@@ -1,0 +1,125 @@
+{
+  "executed_at": "2026-10-15T15:45:47.810547+00:00",
+  "status": "passed",
+  "ragas_requested": false,
+  "test_scope": "真实本地 Ollama + PostgreSQL + Redis + Qdrant；两份虚构示例文档、一条标注案例",
+  "runtime": {
+    "mode": "development",
+    "embedding_provider": "ollama",
+    "embedding_model": "qwen3-embedding:8b",
+    "llm_backend": "ollama",
+    "llm_model": "qwen3.5:9b",
+    "queue": "redis+sql-durable",
+    "vector_store": "qdrant-server",
+    "reranker": "disabled"
+  },
+  "documents": {
+    "company-handbook.md": {
+      "sha256": "2a561778eb85cc9b25129279fce30d1e7d83d54e848683f55004bf79d0477cb0",
+      "chunk_count": 1,
+      "deduplicated": true
+    },
+    "product-guide.md": {
+      "sha256": "08ca1846cc2ba207797c3002b05ae2579bd1b8f85bb03163935ecb1f010ae345",
+      "chunk_count": 1,
+      "deduplicated": true
+    }
+  },
+  "vectors": {
+    "collection": "rag_assistant_e5b3b4d296e1",
+    "embedding_dimension": 4096,
+    "sql_vector_chunk_match": true,
+    "nonzero_vector": true
+  },
+  "standard": {
+    "answer": "根据提供的文档，员工出差住宿报销上限为每人每晚500元 [1]。",
+    "provider": "qwen3.5:9b",
+    "citation_count": 2,
+    "cached": true,
+    "usage": {
+      "cache_hit": true,
+      "model_calls": 0
+    }
+  },
+  "followup": {
+    "answer": "根据文档，报销申请须在出差结束后的**30个自然日内**提交财务审核 [1]。超过此期限须补充部门负责人书面说明。",
+    "same_conversation": true,
+    "history_messages": 4,
+    "citation_count": 2
+  },
+  "agent": {
+    "answer": "根据提供的文档，员工出差住宿报销上限为每人每晚500元 [1]。",
+    "citation_count": 2,
+    "trace_steps": [
+      "cache"
+    ]
+  },
+  "answer_cache": {
+    "hit": true,
+    "identical_answer": true
+  },
+  "retrieval_comparison": {
+    "dense": {
+      "hit_at_5": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "labeled_cases": 1,
+      "total_cases": 1,
+      "latency_ms": 231.77
+    },
+    "hybrid": {
+      "hit_at_5": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "labeled_cases": 1,
+      "total_cases": 1,
+      "latency_ms": 70.92
+    },
+    "relative_hit_rate_change": 0.0,
+    "case_count": 1,
+    "note": "仅两份示例语料的一条标注案例；不能据此宣称普遍性能提升。"
+  },
+  "evaluation": {
+    "status": "completed",
+    "metrics": {
+      "hit_at_5": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "labeled_cases": 1,
+      "total_cases": 1,
+      "latency_ms": 44.65,
+      "ragas_enabled": false,
+      "history_replayed_cases": 0,
+      "reference_token_recall": 1.0
+    }
+  },
+  "history_evaluation": {
+    "metrics": {
+      "hit_at_5": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "labeled_cases": 1,
+      "total_cases": 1,
+      "latency_ms": 0.05,
+      "ragas_enabled": false,
+      "history_replayed_cases": 1,
+      "reference_token_recall": 1.0
+    },
+    "identical_answer": true,
+    "provider": "recorded"
+  },
+  "checks": {
+    "real_embeddings": true,
+    "persisted_chunks": true,
+    "valid_citations": true,
+    "standard_answer": true,
+    "bounded_agent_answer": true,
+    "multi_turn_history": true,
+    "answer_cache": true,
+    "dense_hybrid_comparison": true,
+    "historical_answer_replay": true,
+    "real_ragas_four_metrics": false,
+    "ragas_judge_cache": false
+  },
+  "elapsed_seconds": 0.76
+}

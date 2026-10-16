@@ -1,0 +1,31 @@
+{
+  "checked_at": "2026-10-16T10:57:49+08:00",
+  "timezone": "Asia/Shanghai",
+  "environment": "cook-rag-1",
+  "python_version": "3.12.7",
+  "packages": {
+    "sentence-transformers": "6.1.0",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "langchain-ollama": "0.3.10",
+    "Pillow": "12.3.0"
+  },
+  "credentials_or_connection_strings_recorded": false,
+  "limitations": [
+    "These are real adapter smoke tests, not quality, latency, or cost-improvement benchmarks.",
+    "No API upload, production data, code_c8 files, or application service source is modified.",
+    "The synthetic PNG is under ignored artifacts/; this JSON is the reproducible evidence record."
+  ],
+  "cross_encoder": {
+    "status": "unavailable",
+    "error_type": "OSError",
+    "error": "We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.\nCheck your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.",
+    "duration_seconds": 14.646
+  },
+  "vision": {
+    "status": "unavailable",
+    "error_type": "ConnectError",
+    "error": "[WinError 10013] 以一种访问权限不允许的方式做了一个访问套接字的尝试。",
+    "duration_seconds": 6.92
+  }
+}

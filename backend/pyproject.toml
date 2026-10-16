@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-knowledge-assistant"
+version = "0.1.0"
+description = "知衡：可溯源、多租户、支持混合检索的知识助手"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "SQLAlchemy>=2.0,<3",
+  "psycopg[binary]>=3.2,<4", "pydantic-settings>=2.7,<3", "python-multipart>=0.0.18",
+  "redis>=5,<7", "qdrant-client>=1.14,<2", "rank-bm25>=0.2.2", "jieba>=0.42.1",
+  "numpy>=1.26,<3", "pypdf>=5,<7", "pypdfium2>=4.30,<6", "python-docx>=1.1,<2", "Pillow>=10,<13",
+  "beautifulsoup4>=4.12,<5", "langchain-text-splitters>=0.3.8,<0.4",
+  "langchain-openai>=0.3.35,<0.4", "langchain-ollama>=0.3.10,<0.4", "httpx>=0.27,<1"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-cov>=5,<8", "ruff>=0.9,<1"]
+ml = ["sentence-transformers>=3,<7", "pytesseract>=0.3.13"]
+test = ["pytest>=8,<10", "pytest-cov>=5,<8"]
+models = ["sentence-transformers>=3,<7", "pytesseract>=0.3.13"]
+evaluation = ["ragas==0.3.9", "datasets>=3,<5"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

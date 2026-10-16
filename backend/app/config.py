@@ -1,0 +1,71 @@
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="RAG_", env_file=("../.env", ".env"), extra="ignore"
+    )
+
+    database_url: str = "sqlite:///./data/rag.db"
+    data_dir: Path = Path("./data")
+    secret_key: str = "development-only-change-this-secret-before-production"
+    environment: str = "development"
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    max_upload_mb: int = Field(default=50, ge=1, le=50)
+    redis_url: str = ""
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
+    embedding_provider: str = "hash"
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_dimension: int = Field(default=384, ge=32)
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_num_ctx: int = Field(default=4096, ge=128)
+    embedding_batch_size: int = Field(default=8, ge=1, le=256)
+    llm_provider: str = "openai"
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_api_key: str = ""
+    llm_model: str = ""
+    ollama_num_ctx: int = Field(default=16384, ge=1024)
+    model_timeout: int = Field(default=180, ge=5, le=1800)
+    max_output_tokens: int = Field(default=2048, ge=64)
+    qdrant_collection_prefix: str = Field(default="rag_assistant", min_length=1, max_length=64,
+                                        pattern=r"^[A-Za-z0-9_-]+$")
+    vision_model: str = ""
+    reranker_model: str = ""
+    ocr_enabled: bool = False
+    chunk_size: int = Field(default=800, ge=100, le=10000)
+    chunk_overlap: int = Field(default=120, ge=0)
+    cache_ttl: int = Field(default=3600, ge=0)
+    agent_max_rewrites: int = Field(default=2, ge=0, le=5)
+    worker_poll_seconds: float = Field(default=2.0, gt=0)
+    job_lease_seconds: int = Field(default=600, ge=30)
+    token_lifetime_seconds: int = Field(default=86400, ge=60)
+
+    @model_validator(mode="after")
+    def validate_runtime(self):
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
+        if self.ollama_num_ctx <= self.max_output_tokens + 2048:
+            raise ValueError("ollama_num_ctx must leave at least 2048 tokens beyond max_output_tokens")
+        if self.redis_url and not self.qdrant_url:
+            raise ValueError("A standalone Redis worker requires a Qdrant server; local Qdrant is single-process")
+        if self.environment.lower() == "production":
+            if len(self.secret_key) < 32 or self.secret_key.startswith("development-only"):
+                raise ValueError("Production requires a unique RAG_SECRET_KEY of at least 32 characters")
+            if self.database_url.startswith("sqlite"):
+                raise ValueError("Production requires PostgreSQL via RAG_DATABASE_URL")
+            if not self.redis_url:
+                raise ValueError("Production requires Redis via RAG_REDIS_URL and a standalone worker")
+            if not self.qdrant_url:
+                raise ValueError("Production requires a Qdrant server via RAG_QDRANT_URL")
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

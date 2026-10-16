@@ -1,0 +1,6 @@
+[
+  {"question":"出差住宿报销上限是多少？","reference":"每人每晚500元","expected_document_ids":[]},
+  {"question":"报销申请应在几天内提交？","reference":"出差结束后30个自然日内","expected_document_ids":[]},
+  {"question":"正式员工每年有几天年假？","reference":"10天带薪年假","expected_document_ids":[]},
+  {"question":"Agent最多改写几次查询？","reference":"最多两次","expected_document_ids":[]}
+]
