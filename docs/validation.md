@@ -4,7 +4,7 @@
 
 ## 自动测试
 
-后端20项测试通过，ruff静态检查通过；Vue TypeScript类型检查及Vite生产构建通过。
+后端20项测试通过，ruff静态检查通过；Vue TypeScript类型检查及Vite生产构建通过。推送后的 [GitHub CI](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/runs/38843298699) 也已在干净Linux环境通过后端测试与前端构建。
 
 测试覆盖账户权限与过期token、50MiB上传边界、文件路径、重复上传、任务失败重试与过期租约恢复、文档删除向量清理、Qdrant查询前权限过滤、单文档BM25、PDF空白页、DOCX表格、一次CrossEncoder重排、上下文预算、历史复评所有权和答案缓存失效。
 
@@ -54,4 +54,8 @@ Ragas 0.3.9、本机Qwen裁判的单案例真实评分：
 
 本机完整应用使用PostgreSQL/Redis/Qdrant容器和宿主机Python/Vue/Ollama。完整Compose定义另提供干净部署路径。模型权重、实际API key、原文上传、账号token与本机 `.env` 均未提交到Git。
 
-这不是企业负载、容灾、渗透或大规模OCR评测。CrossEncoder、视觉适配器的独立验证结果如存在则见 `artifacts/model-adapters-2026-10-16.json`，不将配置开关等同于能力质量达标。初始schema使用create_all；大型稀疏索引、团队RBAC、增量数据库迁移仍是后续范围。
+Docker Compose配置检查、前端与后端Docker镜像实际构建均已通过。后端默认包含ml/evaluation：离线、非root容器内pip check无依赖冲突，Ragas0.3.9与CPU PyTorch可正常导入，TestClient `/api/health` 返回200，Tesseract中英文语言包存在。详见 [容器验证记录](artifacts/docker-2026-10-16.json)。这验证了镜像构建和独立启动，不等同于重新部署完整生产Compose栈。
+
+独立模型适配器验证见 [model-adapters-2026-10-16.json](artifacts/model-adapters-2026-10-16.json)：多语言CrossEncoder真实预测两条语句，相关句分数0.9565、不相关句-4.6102；qwen3.5:9b通过正式解析入口提取测试图片，正确保留500和30。视觉样例为简单英文黑白图片，OCR关闭，不代表中文扫描PDF质量基准。主问答冒烟沿用cook配置，未启用重排，独立适配器检查与检索质量对照分别记录。
+
+这不是企业负载、容灾、渗透或大规模OCR评测，不将配置开关等同于能力质量达标。初始schema使用create_all；大型稀疏索引、团队RBAC、增量数据库迁移仍是后续范围。

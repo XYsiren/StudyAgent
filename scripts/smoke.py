@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -237,7 +237,8 @@ def main():
     parser.add_argument("--base-url", default="http://127.0.0.1:8010/api")
     parser.add_argument("--with-ragas", action="store_true", help="调用真实本地评审模型，运行四个 Ragas 指标及缓存回放")
     parser.add_argument("--timeout", type=float, default=1800, help="单次本地模型/入库操作超时秒数")
-    parser.add_argument("--report", type=Path, default=ROOT / "docs" / "artifacts" / "smoke-2026-10-15.json")
+    local_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    parser.add_argument("--report", type=Path, default=ROOT / "docs" / "artifacts" / f"smoke-{local_date}.json")
     args = parser.parse_args()
     parsed = urlsplit(args.base_url)
     require(parsed.hostname in {"127.0.0.1", "localhost"} and not parsed.username and not parsed.password,

@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-10-16T10:57:49+08:00",
+  "checked_at": "2026-10-16T11:00:37+08:00",
   "timezone": "Asia/Shanghai",
   "environment": "cook-rag-1",
   "python_version": "3.12.7",
@@ -17,15 +17,51 @@
     "The synthetic PNG is under ignored artifacts/; this JSON is the reproducible evidence record."
   ],
   "cross_encoder": {
-    "status": "unavailable",
-    "error_type": "OSError",
-    "error": "We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.\nCheck your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.",
-    "duration_seconds": 14.646
+    "status": "passed",
+    "model": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "device": "cpu",
+    "source": "normal-hugging-face-download-or-cache",
+    "pairs": [
+      [
+        "What is the hotel reimbursement limit?",
+        "Hotel expenses are reimbursed up to CNY 500 per night."
+      ],
+      [
+        "What is the hotel reimbursement limit?",
+        "Employees can request annual leave three working days in advance."
+      ]
+    ],
+    "scores": [
+      0.9564767479896545,
+      -4.610201358795166
+    ],
+    "checks": {
+      "two_scores": true,
+      "all_finite": true,
+      "related_score_above_unrelated": true
+    },
+    "duration_seconds": 93.392,
+    "scope": "Real CrossEncoder load and two-pair predict; not a retrieval-quality benchmark."
   },
   "vision": {
-    "status": "unavailable",
-    "error_type": "ConnectError",
-    "error": "[WinError 10013] 以一种访问权限不允许的方式做了一个访问套接字的尝试。",
-    "duration_seconds": 6.92
+    "status": "passed",
+    "provider": "ollama",
+    "model": "qwen3.5:9b",
+    "entrypoint": "app.services.parsing.parse_document",
+    "fixture_path": "artifacts/model-adapters-2026-10-16/vision-policy.png",
+    "fixture_text": [
+      "Travel policy",
+      "Hotel limit: CNY 500",
+      "Submit within 30 days"
+    ],
+    "ocr_enabled": false,
+    "extracted_text": "以下是从图片中提取的文本内容：\n\n---\n\n**Travel policy**\n\nHotel limit: CNY 500\n\nSubmit within 30 days\n\n---\n\n该文本为一段关于差旅政策的说明，包含酒店费用限额（人民币500元）及报销提交时限（30天内）。无图表、表格或需描述的趋势/数值。",
+    "checks": {
+      "one_image_page": true,
+      "contains_500": true,
+      "contains_30": true
+    },
+    "duration_seconds": 8.812,
+    "scope": "Synthetic black-on-white English image only; not a Chinese OCR or scanned-document benchmark."
   }
 }

@@ -1,0 +1,29 @@
+{
+  "checked_date": "2026-10-16",
+  "timezone": "Asia/Shanghai",
+  "compose_config": "passed",
+  "frontend_image_build": "passed",
+  "backend_image_build": "passed",
+  "backend_image": "rag-knowledge-assistant-backend:local",
+  "backend_manifest_sha256": "0a6461a20b9a7c9173253c6e29e7b53875ed1462d8b8719ddcafb14ca8ef0848",
+  "backend_default_extras": ["ml", "evaluation"],
+  "container_validation": {
+    "network": "none",
+    "non_root": true,
+    "pip_check": "No broken requirements found",
+    "ragas_import": "0.3.9",
+    "sentence_transformers_import": "6.1.0",
+    "torch_import": "2.14.1+cpu",
+    "langchain_core_import": "0.3.86",
+    "cuda_available": false,
+    "health_status_code": 200,
+    "health_status": "ok",
+    "tesseract_languages": ["chi_sim", "eng"]
+  },
+  "fixes_verified": [
+    "CPU torch uses a separate cached layer; package downloads retain TLS certificate verification.",
+    "Ragas and LangChain use compatible 0.3 dependency constraints.",
+    "System git is installed for Ragas/GitPython; no GIT_PYTHON_REFRESH suppression is used."
+  ],
+  "scope": "Actual image builds and offline non-root container dependency/import/API-health checks. The full production Compose stack was not redeployed; the host-mode application used real PostgreSQL, Redis, Qdrant and Ollama."
+}

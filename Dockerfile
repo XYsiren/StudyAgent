@@ -1,13 +1,17 @@
 FROM python:3.12-slim
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-chi-sim libgomp1 curl \
+# Ragas imports GitPython even when only its evaluation API is used.
+RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-chi-sim libgomp1 curl git \
     && rm -rf /var/lib/apt/lists/*
+# CPU wheels avoid downloading a CUDA runtime for the default container.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 8 --timeout 60 torch --index-url https://download.pytorch.org/whl/cpu
 COPY backend/ /app/
 ARG INSTALL_EXTRAS=ml,evaluation
-# CPU wheels avoid downloading a CUDA runtime for the default container.
-RUN pip install torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install ".[${INSTALL_EXTRAS}]" \
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 8 --timeout 60 ".[${INSTALL_EXTRAS}]" \
     && useradd --create-home --uid 10001 rag \
     && mkdir -p /app/data && chown -R rag:rag /app
 USER rag
