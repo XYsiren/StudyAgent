@@ -8,11 +8,19 @@
 
 [![CI](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
 ![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+<br>
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-FF4438?logo=redis&logoColor=white)
+![Qdrant](https://img.shields.io/badge/Qdrant-DC244C?logo=qdrant&logoColor=white)
+![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?logo=langchain&logoColor=white)
+![Ragas](https://img.shields.io/badge/Ragas-8B5CF6)
+![Ollama](https://img.shields.io/badge/Ollama-222222?logo=ollama&logoColor=white)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-[项目简介](#项目简介) · [核心能力](#核心能力) · [系统架构](#系统架构) · [快速开始](#快速开始) · [模型接入](#模型接入) · [文档](#文档)
+[项目简介](#项目简介) · [产品预览](#产品预览) · [核心能力](#核心能力) · [系统架构](#系统架构) · [快速开始](#快速开始) · [模型接入](#模型接入) · [文档](#文档)
 
 </div>
 
@@ -34,6 +42,28 @@
 | 产品与技术支持 | 将产品说明、使用手册和技术文档组织为可查询的知识库 |
 | 研究与资料整理 | 跨文档检索关键信息，保留文献片段和页码依据 |
 | RAG 应用开发 | 对比检索策略、检查 Agent 轨迹、复评历史答案与模型效果 |
+
+## 产品预览
+
+### 知识空间
+
+按主题组织知识库，统一管理文档、解析状态与检索分块。
+
+![知衡知识空间与文档管理](docs/images/knowledge-workspace.jpg)
+
+### 引用问答
+
+结合私有文档生成回答，在同一页面查看来源编号、原文片段与页码。
+
+![知衡引用问答与参考证据](docs/images/cited-chat.jpg)
+
+### 质量评测
+
+将历史答案加入评测，结合参考答案与期望文档查看检索指标和 Ragas 结果。
+
+![知衡历史答案复评与质量指标](docs/images/evaluation-center.jpg)
+
+*截图使用仓库内示例文档，展示本地模型运行的实际界面。*
 
 ## 核心能力
 
