@@ -1,0 +1,28 @@
+groups:
+  - name: rag-assistant
+    rules:
+      - alert: RagApiUnavailable
+        expr: up{job="rag-assistant"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: 'Knowledge API metrics endpoint is unavailable'}
+      - alert: RagWorkersMissing
+        expr: rag_workers_alive == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: 'No recent worker heartbeat'}
+      - alert: RagIngestionBacklog
+        expr: rag_ingestion_oldest_queued_seconds > 300
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: 'Ingestion queue age exceeds configured service objective'}
+      - alert: RagCleanupNeedsRecovery
+        expr: rag_cleanup_retry_tasks > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: 'Repeated vector/file cleanup failures require investigation'}
+      - alert: RagHighServerErrorRate
+        expr: sum(rate(rag_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(rag_http_requests_total[5m])), 0.01) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: 'Knowledge API server error ratio exceeds 5 percent'}

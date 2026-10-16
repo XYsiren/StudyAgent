@@ -261,10 +261,57 @@ curl http://127.0.0.1:8010/api/health
 | 模型请求超时 | 检查服务可达性、模型加载与资源占用；同时核对应用与反向代理时限 |
 | 本地前端无法连接 API | 检查 `5173` 与 `8010` 服务、Vite 代理目标，以及跨域部署的 CORS 配置 |
 
-Nginx 和 Vite 开发代理默认使用 180 秒请求时限。较长评测或模型调用需要协调应用的 `RAG_MODEL_TIMEOUT` 与代理超时；评测接口同步返回结果，增加模型时限不会自动延长代理时限。
+Nginx 和 Vite 开发代理默认使用 600 秒时限。问答可使用带保活的真实 SSE；评测提交后返回 202，由前端轮询结果。模型供应商仍有独立请求时限。
 
 ### 备份与升级
 
 同步备份 PostgreSQL、原始上传文件和 Qdrant 快照，并记录对应嵌入模型与集合配置。Redis 保存队列通知和缓存，SQL 持久任务是任务恢复依据。日常重启应保留 Compose 数据卷；删除卷会移除持久数据。
 
-当前版本通过建表初始化数据库，尚未提供 Alembic 迁移流程。涉及数据库结构变化的升级，应先备份并制定迁移方案。恢复备份后，使用实际文档验证原文下载、向量检索和来源引用是否一致。
+数据库使用 Alembic 版本迁移。Compose 的 migrate 服务先升级表结构，API 与 Worker 检查迁移版本后启动。本地开发默认自动迁移；正式升级使用维护窗口和协调备份，升级后旧登录凭证需要重新登录。
+
+
+### 迁移与协调备份
+
+在全部 API、摄取 Worker 和评测 Worker 停止后，执行离线备份。`--quiesced` 表示已停止所有写入方；此参数不会代替停服动作。数据库、上传文件和向量服务必须使用同一时间点的状态。
+
+```bash
+docker compose --env-file .env.docker stop web api worker evaluation-worker
+docker compose --env-file .env.docker run --rm --no-deps api python -m app.maintenance backup --path /app/data/backups/before-upgrade --quiesced
+docker compose --env-file .env.docker run --rm --no-deps api python -m app.maintenance verify-backup --path /app/data/backups/before-upgrade
+docker compose --env-file .env.docker run --rm --no-deps api python -m app.maintenance migrate
+docker compose --env-file .env.docker up -d
+```
+
+备份目录必须是新目录，包含数据库 dump、上传文件、项目集合快照及 SHA256 清单。备份包含业务原件及数据库内容，应保存到受控的加密存储，并独立保管部署密钥。主机/数据卷损坏时，需要异地主副本；同卷备份仅适用于升级回退。
+
+恢复时，配置一个**空数据库、空上传目录和未使用的集合前缀**，停止目标环境的全部写入方，再运行：
+
+```bash
+python -m app.maintenance restore --path /secure-backup/snapshot --quiesced
+python -m app.maintenance reconcile
+```
+
+恢复会先校验全部文件并拒绝覆盖已有表或集合；支持重定位上传文件路径和项目集合前缀。本机未安装 pg_dump/pg_restore 时，可用 `--postgres-container <数据库容器名>` 通过本机 PostgreSQL 容器执行工具。容器镜像已包含 PostgreSQL 客户端。
+
+恢复后验证登录、文档数量、原文下载、版本引用、问答及待处理任务，记录业务可接受的恢复点和恢复耗时。向量快照兼容性参考 [Qdrant 官方说明](https://qdrant.tech/documentation/operations/snapshots/)。
+
+`reconcile` 默认只报告；在停写后可执行 `reconcile --apply --quiesced` 清理无主向量。缺失或模型切换后的向量，应通过文档“重新索引”修复。恢复中途失败时保留备份并使用新的空目标重试。
+
+### 监控与模型探针
+
+```bash
+curl http://127.0.0.1:8010/api/ready
+python -m app.health models
+python scripts/configure-monitoring.py --env-file .env.docker
+docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+```
+
+监控配置把独立令牌保存到忽略提交的 `.secrets/metrics_token`；API 重新启动后启用 `/api/metrics`，Prometheus 在本机 9090 端口提供查询。示例规则覆盖 API 不可用、Worker 心跳缺失、任务积压、清理重试及错误率，实际阈值需要按业务负载调整。告警通知渠道由部署方接入 Alertmanager。
+
+模型探针只检查 API 连通与模型列表，不执行付费生成；部分兼容服务不提供 `/models`，此时需要结合实际推理验证。HTTP 指标统计到响应头的耗时，完整生成时延查看 RAG 阶段指标及消息运行元数据。
+
+### 组织、登录与文档源
+
+组织角色、知识库单独授权、OIDC 参数、会话撤销、配额与目录同步的配置见[团队治理与可靠性](enterprise.md)。HTTPS 入口配置实际的 `RAG_PUBLIC_BASE_URL`、`RAG_CORS_ORIGINS` 和 `RAG_COOKIE_SECURE=true`，反向代理仅信任受控网关。
+
+当前 Compose 为单实例存储部署。多个 API/Worker 主机需要共享原件存储、数据库/向量副本和模型容量规划，并在目标环境验证故障切换。

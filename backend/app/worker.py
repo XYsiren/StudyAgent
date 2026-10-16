@@ -1,6 +1,8 @@
-"""Durable ingestion worker: SQL leases are authoritative; Redis wakes consumers."""
+"""Durable ingestion/evaluation/outbox worker with leases and bounded retries."""
 import logging
 import threading
+import uuid
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
@@ -10,181 +12,264 @@ from sqlalchemy import delete, or_, select, update
 
 from app.config import get_settings
 from app.db import Database
-from app.models import Chunk, Document, IngestionJob, new_id, utcnow
+from app.models import (
+    AdmissionSlot,
+    Chunk,
+    CleanupTask,
+    Document,
+    DocumentRevision,
+    EvaluationRun,
+    IngestionJob,
+    KnowledgeBase,
+    User,
+    new_id,
+    utcnow,
+)
 
 logger = logging.getLogger(__name__)
 QUEUE_KEY = "rag:ingestion:pending"
 
 
-def notify_job(settings, job_id: str):
+def notify_job(settings, job_id):
     if settings.redis_url:
         try:
             with Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2) as client:
-                client.lpush(QUEUE_KEY, job_id)
+                key = settings.qdrant_collection_prefix + ":" + QUEUE_KEY
+                client.lpush(key, job_id)
+                client.ltrim(key, 0, 99)
+                client.expire(key, 60)
         except (RedisError, ValueError):
-            # The SQL record survives a Redis outage and is found by periodic scans.
-            logger.warning("Redis notification unavailable; durable SQL job %s remains queued", job_id)
+            logger.warning("Redis unavailable; SQL job remains durable")
 
 
-def _claim(database, settings, job_id: str) -> str | None:
+def _claim(database, settings, job_id):
     now, lease = utcnow(), new_id()
     with database.session() as db:
-        result = db.execute(update(IngestionJob).where(
-            IngestionJob.id == job_id,
-            or_(IngestionJob.status == "queued",
-                (IngestionJob.status == "processing") &
-                or_(IngestionJob.lease_expires_at < now, IngestionJob.lease_expires_at.is_(None))),
-        ).values(status="processing", progress=1, error=None, lease_token=lease,
-                 lease_expires_at=now + timedelta(seconds=settings.job_lease_seconds),
-                 attempts=IngestionJob.attempts + 1, updated_at=now))
+        changed = db.execute(update(IngestionJob).where(IngestionJob.id == job_id,
+            or_(IngestionJob.available_at.is_(None), IngestionJob.available_at <= now),
+            or_(IngestionJob.status == "queued", (IngestionJob.status == "processing") &
+                or_(IngestionJob.lease_expires_at < now, IngestionJob.lease_expires_at.is_(None))))
+            .values(status="processing", progress=1, error=None, lease_token=lease,
+                lease_expires_at=now + timedelta(seconds=settings.job_lease_seconds),
+                attempts=IngestionJob.attempts + 1, updated_at=now))
         db.commit()
-        return lease if result.rowcount == 1 else None
+        return lease if changed.rowcount else None
 
 
 def _heartbeat(database, settings, job_id, lease, done):
     while not done.wait(min(15, settings.job_lease_seconds / 3)):
         try:
             with database.session() as db:
-                db.execute(update(IngestionJob).where(
-                    IngestionJob.id == job_id, IngestionJob.lease_token == lease,
-                    IngestionJob.status == "processing",
-                ).values(lease_expires_at=utcnow() + timedelta(seconds=settings.job_lease_seconds),
-                         updated_at=utcnow()))
+                changed = db.execute(update(IngestionJob).where(IngestionJob.id == job_id,
+                    IngestionJob.lease_token == lease, IngestionJob.status == "processing").values(
+                    lease_expires_at=utcnow() + timedelta(seconds=settings.job_lease_seconds), updated_at=utcnow()))
                 db.commit()
+                if not changed.rowcount:
+                    return
         except Exception:
-            logger.exception("Job heartbeat failed for %s", job_id)
+            logger.exception("Ingestion heartbeat failed")
 
 
-def process_job(database: Database, settings, job_id: str):
+def process_job(database, settings, job_id):
+    from app.services.corpus import term_rows
     from app.services.parsing import chunk_pages, parse_document
-    from app.services.retrieval import delete_document, index_chunks
-
+    from app.services.retrieval import index_chunks
     lease = _claim(database, settings, job_id)
-    if lease is None:
+    if not lease:
         return
     done = threading.Event()
     heartbeat = threading.Thread(target=_heartbeat, args=(database, settings, job_id, lease, done), daemon=True)
     heartbeat.start()
-    document_id = None
+    document_id = revision_id = None
     try:
         with database.session() as db:
             job = db.get(IngestionJob, job_id)
             document = db.get(Document, job.document_id) if job else None
-            if document is None:
+            if not document:
                 return
-            document_id, filename, stored_path, kb_id = document.id, document.name, document.stored_path, document.knowledge_base_id
-            document.status, document.error = "processing", None
+            document_id, kb_id = document.id, document.knowledge_base_id
+            revision = db.get(DocumentRevision, job.revision_id) if job.revision_id else None
+            if revision is None or revision.status == "ready":
+                revision = DocumentRevision(document_id=document.id, name=document.name, stored_path=document.stored_path,
+                    sha256=document.sha256, size_bytes=document.size_bytes)
+                db.add(revision)
+                db.flush()
+                job.revision_id = revision.id
+            revision_id, filename, stored_path = revision.id, revision.name, revision.stored_path
+            revision.status, document.status, document.error = "processing", "processing", None
+            db.add(CleanupTask(document_id=document_id, revision_id=revision_id,
+                available_at=utcnow() + timedelta(seconds=settings.job_lease_seconds)))
             db.commit()
-        upload_root = (settings.data_dir / "uploads").resolve()
         path = Path(stored_path).resolve()
-        if not path.is_relative_to(upload_root):
+        if not path.is_relative_to((settings.data_dir / "uploads").resolve()):
             raise ValueError("文件存储路径不在 uploads 目录内")
-        pages = parse_document(path, filename)
-        parsed_chunks = chunk_pages(pages)
-        if not parsed_chunks:
-            raise ValueError("未提取到可索引的文本；扫描件请启用 OCR 或配置视觉模型")
-        indexed = [{"id": new_id(), "document_id": document_id, "document_name": filename,
-                    "knowledge_base_id": kb_id, "text": item["text"], "page": item.get("page"),
-                    "ordinal": item.get("ordinal", ordinal)} for ordinal, item in enumerate(parsed_chunks)]
+        parsed = chunk_pages(parse_document(path, filename))
+        indexed = [{"id": str(uuid.uuid5(uuid.UUID(revision_id), str(item["ordinal"]))), "document_id": document_id, "document_name": filename,
+            "knowledge_base_id": kb_id, "revision_id": revision_id, **item} for item in parsed]
+
+        @contextmanager
+        def fence():
+            with database.session() as db:
+                doc = db.scalar(select(Document).where(Document.id == document_id).with_for_update())
+                if doc is None:
+                    raise ValueError("文档已删除")
+                db.execute(update(Document).where(Document.id == document_id).values(status=doc.status))
+                job = db.scalar(select(IngestionJob).where(IngestionJob.id == job_id).with_for_update())
+                if not job or job.lease_token != lease or job.status != "processing":
+                    raise ValueError("任务租约已被替换")
+                yield
+                db.commit()
+
+        index_chunks(indexed, write_fence=fence)
         with database.session() as db:
-            # Acquire a write lock before vector indexing. Deletion uses the same
-            # ordering, so no late vector write can survive a committed delete.
-            document_lock = db.execute(update(Document).where(Document.id == document_id)
-                                       .values(status="processing"))
-            if document_lock.rowcount != 1:
-                db.rollback()
+            doc = db.scalar(select(Document).where(Document.id == document_id).with_for_update())
+            if not doc:
                 return
-            owned = db.execute(update(IngestionJob).where(
-                IngestionJob.id == job_id, IngestionJob.lease_token == lease,
-                IngestionJob.status == "processing",
-            ).values(progress=70, updated_at=utcnow()))
-            document = db.get(Document, document_id)
-            if owned.rowcount != 1 or document is None:
-                db.rollback()
+            owned = db.execute(update(IngestionJob).where(IngestionJob.id == job_id,
+                IngestionJob.lease_token == lease, IngestionJob.status == "processing").values(progress=90))
+            job = db.get(IngestionJob, job_id)
+            if not owned.rowcount or not job:
                 return
-            db.execute(delete(Chunk).where(Chunk.document_id == document_id))
-            delete_document(document_id)
+            old = doc.active_revision_id
+            db.execute(delete(Chunk).where(Chunk.document_id == document_id, Chunk.revision_id == revision_id))
             for item in indexed:
-                db.add(Chunk(id=item["id"], document_id=document_id, text=item["text"],
-                             page=item["page"], ordinal=item["ordinal"]))
-            db.flush()
-            index_chunks(indexed)
-            document.status, document.chunk_count, document.error = "ready", len(indexed), None
-            db.execute(update(IngestionJob).where(IngestionJob.id == job_id,
-                       IngestionJob.lease_token == lease).values(status="completed", progress=100,
-                       error=None, lease_token=None, lease_expires_at=None, updated_at=utcnow()))
+                length, terms = term_rows(item["id"], item["text"])
+                db.add(Chunk(id=item["id"], document_id=document_id, revision_id=revision_id, text=item["text"],
+                             page=item.get("page"), ordinal=item["ordinal"], token_count=length))
+                db.flush()
+                db.add_all(terms)
+            revision = db.get(DocumentRevision, revision_id)
+            revision.status, revision.chunk_count = "ready", len(indexed)
+            doc.active_revision_id, doc.status, doc.chunk_count, doc.error = revision_id, "ready", len(indexed), None
+            doc.stored_path, doc.name, doc.sha256, doc.size_bytes = (
+                revision.stored_path, revision.name, revision.sha256, revision.size_bytes)
+            db.execute(update(KnowledgeBase).where(KnowledgeBase.id == kb_id).values(generation=KnowledgeBase.generation + 1))
+            if old and old != revision_id:
+                db.add(CleanupTask(document_id=document_id, revision_id=old))
+            db.execute(update(CleanupTask).where(CleanupTask.document_id == document_id,
+                CleanupTask.revision_id == revision_id, CleanupTask.status == "queued").values(status="completed"))
+            job.status, job.progress, job.error = "completed", 100, None
+            job.lease_token = job.lease_expires_at = None
             db.commit()
     except Exception as exc:
         logger.exception("Ingestion failed: %s", job_id)
-        # Keep failure state durable and clear both partial SQL and vector data.
+        transient = not isinstance(exc, (ValueError, FileNotFoundError))
         with database.session() as db:
-            if document_id:
-                db.execute(update(Document).where(Document.id == document_id).values(status="processing"))
-            owned = db.execute(update(IngestionJob).where(
-                IngestionJob.id == job_id, IngestionJob.lease_token == lease,
-            ).values(status="failed", progress=0, error=str(exc)[:2000],
-                     lease_token=None, lease_expires_at=None, updated_at=utcnow()))
-            if owned.rowcount:
-                document = db.get(Document, document_id) if document_id else None
-                if document:
-                    document.status, document.error, document.chunk_count = "failed", str(exc)[:2000], 0
-                    db.execute(delete(Chunk).where(Chunk.document_id == document_id))
-                    try:
-                        delete_document(document_id)
-                    except Exception:
-                        logger.exception("Partial vector cleanup failed for document %s", document_id)
+            owned = db.execute(update(IngestionJob).where(IngestionJob.id == job_id,
+                IngestionJob.lease_token == lease).values(updated_at=utcnow()))
+            job = db.get(IngestionJob, job_id)
+            if owned.rowcount and job:
+                retry = transient and job.attempts < settings.worker_max_attempts
+                job.status, job.error, job.progress = "queued" if retry else "failed", type(exc).__name__ + ": " + str(exc)[:500], 0
+                job.available_at = utcnow() + timedelta(seconds=2 ** job.attempts) if retry else None
+                job.lease_token = job.lease_expires_at = None
+                doc, revision = db.get(Document, document_id), db.get(DocumentRevision, revision_id) if revision_id else None
+                if doc:
+                    doc.status, doc.error = ("queued" if retry else "ready" if doc.active_revision_id else "failed"), job.error
+                if revision:
+                    revision.status = "queued" if retry else "failed"
                 db.commit()
-            else:
-                db.rollback()
     finally:
         done.set()
         heartbeat.join(timeout=2)
 
 
-def run_worker(database: Database, settings, stop: threading.Event):
-    client = None
-    if settings.redis_url:
-        client = Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=3)
-    try:
+def process_evaluation(database, settings, run_id):
+    from app.services.corpus import CorpusScope
+    from app.services.evaluation import evaluate_cases
+    lease, now = new_id(), utcnow()
+    with database.session() as db:
+        changed = db.execute(update(EvaluationRun).where(EvaluationRun.id == run_id,
+            or_(EvaluationRun.status == "queued", (EvaluationRun.status == "running") &
+                (EvaluationRun.lease_expires_at < now))).values(status="running", lease_token=lease,
+                    lease_expires_at=now + timedelta(seconds=settings.model_timeout * 600 + 300)))
+        db.commit()
+        if not changed.rowcount:
+            return
+        run = db.get(EvaluationRun, run_id)
+        try:
+            user = db.get(User, run.user_id)
+            if user.disabled:
+                raise ValueError("账户已停用")
+            from app.services.access import allowed_kbs
+            accessible = set(db.scalars(select(KnowledgeBase.id).where(allowed_kbs(user.id))).all())
+            if any(c.get("knowledge_base_id") not in accessible for case in run.cases
+                   for c in case.get("recorded_citations", [])):
+                raise ValueError("历史证据的权限已撤销")
+            scope = CorpusScope(db, user, run.knowledge_base_ids)
+            fingerprint = scope.fingerprint()
+            result = evaluate_cases(run.cases, scope, run.use_ragas)
+            if fingerprint != CorpusScope(db, user, run.knowledge_base_ids).fingerprint():
+                raise ValueError("语料或权限在评测期间变化，请重跑以保持比较口径一致")
+            db.execute(update(EvaluationRun).where(EvaluationRun.id == run_id, EvaluationRun.lease_token == lease)
+                .values(status="completed", metrics=result["metrics"], results=result["results"],
+                        lease_token=None, lease_expires_at=None))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            db.execute(update(EvaluationRun).where(EvaluationRun.id == run_id, EvaluationRun.lease_token == lease)
+                .values(status="failed", error=type(exc).__name__ + ": " + str(exc)[:500],
+                        lease_token=None, lease_expires_at=None))
+            db.commit()
+
+
+def run_worker(database, settings, stop):
+    from app.services.cleanup import process_cleanup
+    from app.services.observability import worker_heartbeat
+    def pulse():
         while not stop.is_set():
             try:
-                with database.session() as db:
-                    pending = db.scalars(select(IngestionJob.id).where(or_(
-                        IngestionJob.status == "queued",
-                        (IngestionJob.status == "processing") & or_(
-                            IngestionJob.lease_expires_at < utcnow(), IngestionJob.lease_expires_at.is_(None)),
-                    )).order_by(IngestionJob.created_at).limit(20)).all()
-                if pending:
-                    for job_id in pending:
-                        if stop.is_set():
-                            break
-                        process_job(database, settings, job_id)
-                    continue
-                if client:
-                    try:
-                        item = client.brpop(QUEUE_KEY, timeout=max(1, min(2, int(settings.worker_poll_seconds))))
-                        if item:
-                            process_job(database, settings, item[1].decode())
-                    except RedisError:
-                        logger.warning("Redis unavailable; continuing SQL recovery scan")
-                        stop.wait(settings.worker_poll_seconds)
-                else:
-                    stop.wait(settings.worker_poll_seconds)
+                worker_heartbeat(database)
             except Exception:
-                logger.exception("Worker loop failed; retrying durable jobs")
+                logger.exception("Worker heartbeat unavailable")
+            stop.wait(15)
+    threading.Thread(target=pulse, daemon=True).start()
+    while not stop.is_set():
+        try:
+            worker_heartbeat(database)
+            now = utcnow()
+            with database.session() as db:
+                pending = db.scalars(select(IngestionJob.id).where(
+                    or_(IngestionJob.available_at.is_(None), IngestionJob.available_at <= now),
+                    or_(IngestionJob.status == "queued", (IngestionJob.status == "processing") &
+                        or_(IngestionJob.lease_expires_at < now, IngestionJob.lease_expires_at.is_(None))))
+                    .order_by(IngestionJob.created_at).limit(10)).all()
+                cleanup = db.scalars(select(CleanupTask.id).where(CleanupTask.status.in_(["queued", "processing"]),
+                    CleanupTask.available_at <= now, or_(CleanupTask.lease_expires_at.is_(None),
+                    CleanupTask.lease_expires_at < now)).limit(20)).all()
+                evaluations = db.scalars(select(EvaluationRun.id).where(or_(EvaluationRun.status == "queued",
+                    (EvaluationRun.status == "running") & (EvaluationRun.lease_expires_at < now))).limit(1)).all()
+                db.execute(delete(AdmissionSlot).where(AdmissionSlot.expires_at < now))
+                db.commit()
+            for task_id in cleanup:
+                if not stop.is_set():
+                    process_cleanup(database, settings, task_id)
+            for job_id in pending:
+                if not stop.is_set() and settings.worker_role in {"all", "ingestion"}:
+                    process_job(database, settings, job_id)
+            for run_id in evaluations:
+                if not stop.is_set() and settings.worker_role in {"all", "evaluation"}:
+                    process_evaluation(database, settings, run_id)
+            if settings.redis_url and not pending and not evaluations and not cleanup:
+                try:
+                    with Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=3) as client:
+                        client.brpop(settings.qdrant_collection_prefix + ":" + QUEUE_KEY,
+                                     timeout=min(2.0, settings.worker_poll_seconds))
+                except RedisError:
+                    stop.wait(settings.worker_poll_seconds)
+            else:
                 stop.wait(settings.worker_poll_seconds)
-    finally:
-        if client:
-            client.close()
+        except Exception:
+            logger.exception("Worker loop failed")
+            stop.wait(settings.worker_poll_seconds)
 
 
 def main():
     import signal
     logging.basicConfig(level=logging.INFO)
-    settings = get_settings()
+    settings, stop = get_settings(), threading.Event()
     database = Database(settings)
     database.initialize()
-    stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     try:

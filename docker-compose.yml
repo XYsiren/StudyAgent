@@ -4,8 +4,11 @@ x-backend: &backend
   build:
     context: .
     dockerfile: Dockerfile
-  image: rag-knowledge-assistant-backend:local
+  image: ${RAG_BACKEND_IMAGE:-rag-knowledge-assistant-backend:local}
   restart: unless-stopped
+  mem_limit: ${RAG_SERVICE_MEMORY:-4g}
+  cpus: ${RAG_SERVICE_CPUS:-2.0}
+  pids_limit: 256
   environment: &backend-env
     RAG_ENVIRONMENT: production
     RAG_DATABASE_URL: postgresql+psycopg://rag:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/rag
@@ -32,6 +35,26 @@ x-backend: &backend
     RAG_QDRANT_COLLECTION_PREFIX: rag_assistant
     RAG_VISION_MODEL: ${RAG_VISION_MODEL:-}
     RAG_OCR_ENABLED: ${RAG_OCR_ENABLED:-true}
+    RAG_AUTO_MIGRATE: "false"
+    RAG_ALLOW_REGISTRATION: ${RAG_ALLOW_REGISTRATION:-true}
+    RAG_PUBLIC_BASE_URL: ${RAG_PUBLIC_BASE_URL:-http://localhost:8080}
+    RAG_COOKIE_SECURE: ${RAG_COOKIE_SECURE:-false}
+    RAG_CORS_ORIGINS: ${RAG_CORS_ORIGINS:-["http://localhost:8080","http://127.0.0.1:8080"]}
+    RAG_AUTH_RATE_PER_MINUTE: ${RAG_AUTH_RATE_PER_MINUTE:-20}
+    RAG_CHAT_RATE_PER_MINUTE: ${RAG_CHAT_RATE_PER_MINUTE:-30}
+    RAG_USER_STORAGE_MB: ${RAG_USER_STORAGE_MB:-1024}
+    RAG_MAX_PENDING_JOBS: ${RAG_MAX_PENDING_JOBS:-20}
+    RAG_MAX_ACTIVE_CHATS: ${RAG_MAX_ACTIVE_CHATS:-2}
+    RAG_GLOBAL_ACTIVE_CHATS: ${RAG_GLOBAL_ACTIVE_CHATS:-4}
+    RAG_USER_DAILY_MODEL_REQUESTS: ${RAG_USER_DAILY_MODEL_REQUESTS:-500}
+    RAG_CITATION_VERIFIER: ${RAG_CITATION_VERIFIER:-numeric}
+    RAG_VERIFIER_MODEL: ${RAG_VERIFIER_MODEL:-}
+    RAG_EVIDENCE_MIN_COVERAGE: ${RAG_EVIDENCE_MIN_COVERAGE:-0.25}
+    RAG_METRICS_TOKEN: ${RAG_METRICS_TOKEN:-}
+    RAG_OIDC_ISSUER: ${RAG_OIDC_ISSUER:-}
+    RAG_OIDC_CLIENT_ID: ${RAG_OIDC_CLIENT_ID:-}
+    RAG_OIDC_CLIENT_SECRET: ${RAG_OIDC_CLIENT_SECRET:-}
+    RAG_OIDC_REDIRECT_URI: ${RAG_OIDC_REDIRECT_URI:-http://localhost:8080/api/auth/oidc/callback}
     HF_HOME: /app/data/models
   volumes:
     - app-data:/app/data
@@ -78,21 +101,54 @@ services:
       QDRANT__SERVICE__API_KEY: ${RAG_QDRANT_API_KEY:?Set RAG_QDRANT_API_KEY}
     volumes:
       - qdrant-data:/qdrant/storage
+  migrate:
+    <<: *backend
+    command: [python, -m, app.maintenance, migrate]
+    restart: "no"
+    healthcheck:
+      disable: true
   api:
     <<: *backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     ports:
-      - 127.0.0.1:8010:8000
+      - 127.0.0.1:${RAG_API_PORT:-8010}:8000
   worker:
     <<: *backend
     command: [python, -m, app.worker]
+    environment:
+      <<: *backend-env
+      RAG_WORKER_ROLE: ingestion
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      disable: true
+      test: [CMD, python, -m, app.health, worker]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+  evaluation-worker:
+    <<: *backend
+    command: [python, -m, app.worker]
+    environment:
+      <<: *backend-env
+      RAG_WORKER_ROLE: evaluation
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -m, app.health, worker]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
   web:
+    image: ${RAG_WEB_IMAGE:-rag-knowledge-assistant-web:local}
     build:
       context: ./frontend
     restart: unless-stopped
     ports:
-      - 8080:80
+      - ${RAG_WEB_PORT:-8080}:80
     depends_on:
       api:
         condition: service_healthy

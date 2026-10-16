@@ -30,14 +30,14 @@ def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
 
 
-def issue_token(user_id: str, settings: Settings) -> str:
+def issue_token(user_id: str, settings: Settings, session_id: str | None = None) -> str:
     payload = _b64(json.dumps({"sub": user_id, "exp": int(time.time()) + settings.token_lifetime_seconds,
-                               "nonce": secrets.token_hex(8)}, separators=(",", ":")).encode())
+                               "nonce": session_id or secrets.token_hex(8)}, separators=(",", ":")).encode())
     signature = _b64(hmac.new(settings.secret_key.encode(), payload.encode(), hashlib.sha256).digest())
     return f"{payload}.{signature}"
 
 
-def token_subject(token: str, settings: Settings) -> str | None:
+def token_claims(token: str, settings: Settings) -> dict | None:
     try:
         if len(token) > 2048:
             return None
@@ -49,6 +49,11 @@ def token_subject(token: str, settings: Settings) -> str | None:
         if not isinstance(data.get("exp"), int) or data["exp"] <= time.time():
             return None
         subject = data.get("sub")
-        return subject if isinstance(subject, str) and len(subject) == 36 else None
+        return data if isinstance(subject, str) and len(subject) == 36 else None
     except (ValueError, TypeError, KeyError, UnicodeError):
         return None
+
+
+def token_subject(token: str, settings: Settings) -> str | None:
+    claims = token_claims(token, settings)
+    return claims["sub"] if claims else None

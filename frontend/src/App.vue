@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ArrowDownToLine, ArrowRight, ArrowUp, BookOpen, Check, CheckCheck, ChevronDown, ChevronRight, CircleHelp, Clock3, Database, FileCheck2, FileSearch, FileText, FlaskConical, FolderOpen, Layers3, LoaderCircle, LogOut, Menu, MessageSquare, Plus, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, Trash2, UploadCloud, X, Zap } from 'lucide-vue-next'
-import { api, ApiError, API_BASE, downloadDocument } from './api'
+import { api, ApiError, API_BASE, downloadDocument, streamChat } from './api'
+import GovernancePanel from './components/GovernancePanel.vue'
+import DocumentVersions from './components/DocumentVersions.vue'
 import type { ChatResponse, Chunk, Citation, Comparison, Conversation, Document, Evaluation, EvaluationCase, Job, KnowledgeBase, Message, Runtime, User } from './api'
 
-type View = 'library' | 'chat' | 'evaluations' | 'system'
+type View = 'library' | 'chat' | 'evaluations' | 'governance' | 'system'
 const user = ref<User | null>(null)
 const restoring = ref(true)
 const authMode = ref<'login' | 'register'>('login')
@@ -17,13 +19,21 @@ const error = ref('')
 const notice = ref('')
 const busy = ref(false)
 const runtime = ref<Runtime | null>(null)
-const health = ref<'checking' | 'online' | 'offline'>('checking')
+const health = ref<'checking' | 'online' | 'degraded' | 'offline'>('checking')
+function connectionText() { return health.value === 'online' ? '服务已连接' : health.value === 'checking' ? '正在检测服务' : health.value === 'degraded' ? '部分服务待恢复' : '服务未连接' }
 const knowledgeBases = ref<KnowledgeBase[]>([])
 const documents = ref<Document[]>([])
 const selectedKbId = ref('')
 const documentQuery = ref('')
 const showKbModal = ref(false)
-const kbForm = ref({ name: '', description: '' })
+const organizations = ref<{ id: string; name: string; role: string }[]>([])
+const kbForm = ref({ name: '', description: '', organization_id: '', visibility: 'organization' })
+const versionDocument = ref<Document | null>(null)
+const oidcEnabled = ref(false)
+const chatDraft = ref('')
+let chatController: AbortController | null = null
+let lastAttempt: { key: string; body: string } | null = null
+function canWrite(doc: Document) { return knowledgeBases.value.find(kb => kb.id === doc.knowledge_base_id)?.role !== 'reader' }
 const creatingKb = ref(false)
 const uploading = ref(false)
 const dragging = ref(false)
@@ -36,15 +46,18 @@ const deleting = ref('')
 const selectedKb = computed(() => knowledgeBases.value.find(kb => kb.id === selectedKbId.value))
 const selectedDocuments = computed(() => documents.value.filter(doc => !selectedKbId.value || doc.knowledge_base_id === selectedKbId.value))
 const filteredDocuments = computed(() => selectedDocuments.value.filter(doc => doc.name.toLowerCase().includes(documentQuery.value.toLowerCase())))
-const readyDocuments = computed(() => documents.value.filter(doc => ['ready', 'completed'].includes(doc.status)).length)
+const readyDocuments = computed(() => documents.value.filter(doc => doc.active_revision_id && !isExpired(doc)).length)
+function isExpired(doc: Document) { return !!doc.expires_at && new Date(doc.expires_at.endsWith('Z') ? doc.expires_at : doc.expires_at + 'Z').getTime() <= Date.now() }
+function documentStatus(doc: Document) { return isExpired(doc) ? '已过期' : doc.active_revision_id && ['queued', 'processing'].includes(doc.status) ? '更新中 · 旧版可用' : statusText(doc.status) }
 const chunkCount = computed(() => documents.value.reduce((total, doc) => total + (doc.chunk_count || 0), 0))
 const totalSize = computed(() => documents.value.reduce((total, doc) => total + (doc.size_bytes || 0), 0))
 const navItems: { id: View; label: string; en: string; icon: typeof BookOpen }[] = [
   { id: 'library', label: '知识空间', en: 'Knowledge', icon: BookOpen },
   { id: 'chat', label: '智能问答', en: 'Assistant', icon: MessageSquare },
   { id: 'evaluations', label: '评测中心', en: 'Evaluation', icon: FlaskConical },
+  { id: 'governance', label: '团队与治理', en: 'Governance', icon: ShieldCheck },
 ]
-const titles = { library: '知识空间', chat: '智能问答', evaluations: '评测中心', system: '系统与模型' }
+const titles = { library: '知识空间', chat: '智能问答', evaluations: '评测中心', system: '系统与模型', governance: '团队与治理' }
 
 const conversations = ref<Conversation[]>([])
 const conversationId = ref('')
@@ -105,7 +118,7 @@ function comparisonMetrics(result: Record<string, unknown>): Record<string, unkn
 }
 function date(value?: string) {
   if (!value) return '—'
-  const parsed = new Date(value)
+  const parsed = new Date(/Z$|[+-]\d\d:\d\d$/.test(value) ? value : value + 'Z')
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 function bytes(value: number) {
@@ -125,10 +138,11 @@ function toggleId(ids: string[], id: string) { const index = ids.indexOf(id); in
 function selectKb(id: string) { selectedKbId.value = id; documentQuery.value = '' }
 
 async function checkHealth() {
-  try { await api('/health'); health.value = 'online' } catch { health.value = 'offline' }
+  try { await api('/ready'); health.value = 'online' } catch (reason) { health.value = reason instanceof ApiError && reason.status === 503 ? 'degraded' : 'offline' }
 }
 async function loadWorkspace() {
   busy.value = true
+  organizations.value = await api<{ id: string; name: string; role: string }[]>('/organizations').catch(() => [])
   const results = await Promise.allSettled([
     api<KnowledgeBase[]>('/knowledge-bases'), api<Document[]>('/documents'), api<Runtime>('/system'),
     api<Conversation[]>('/conversations'), api<Evaluation[]>('/evaluations'),
@@ -146,12 +160,14 @@ async function signIn() {
   try {
     const payload = authMode.value === 'register' ? auth.value : { email: auth.value.email, password: auth.value.password }
     const response = await api<{ access_token: string; user: User }>(`/auth/${authMode.value}`, { method: 'POST', body: JSON.stringify(payload) })
-    localStorage.setItem('zhiheng_token', response.access_token); user.value = response.user
+    localStorage.removeItem('zhiheng_token'); user.value = response.user
     await loadWorkspace(); await checkHealth()
   } catch (reason) { authError.value = reason instanceof Error ? reason.message : '登录失败' }
   finally { authenticating.value = false }
 }
 function logout() {
+  void api('/auth/logout', { method: 'POST' }).catch(() => {})
+  chatController?.abort()
   localStorage.removeItem('zhiheng_token'); user.value = null; documents.value = []; knowledgeBases.value = []
   runtime.value = null; conversations.value = []; messages.value = []; evaluations.value = []; evaluation.value = null
   conversationId.value = ''; selectedKbId.value = ''; error.value = ''; auth.value.password = ''
@@ -160,8 +176,8 @@ async function createKb() {
   if (!kbForm.value.name.trim()) return
   creatingKb.value = true
   try {
-    const kb = await api<KnowledgeBase>('/knowledge-bases', { method: 'POST', body: JSON.stringify(kbForm.value) })
-    knowledgeBases.value.push(kb); selectedKbId.value = kb.id; kbForm.value = { name: '', description: '' }; showKbModal.value = false
+    const kb = await api<KnowledgeBase>('/knowledge-bases', { method: 'POST', body: JSON.stringify({ ...kbForm.value, organization_id: kbForm.value.organization_id || null }) })
+    knowledgeBases.value.push(kb); selectedKbId.value = kb.id; kbForm.value = { name: '', description: '', organization_id: '', visibility: 'organization' }; showKbModal.value = false
     notify('知识库已创建，可以开始上传文档。')
   } catch (reason) { fail(reason) } finally { creatingKb.value = false }
 }
@@ -227,8 +243,8 @@ async function openPreview(doc: Document) {
   try { preview.value = { document: doc, chunks: await api<Chunk[]>(`/documents/${doc.id}/chunks`) } }
   catch (reason) { fail(reason) } finally { previewLoading.value = false; previewingId.value = '' }
 }
-async function download(id: string, name: string) {
-  try { await downloadDocument(id, name) } catch (reason) { fail(reason) }
+async function download(id: string, name: string, revisionId?: string) {
+  try { await downloadDocument(id, name, revisionId) } catch (reason) { fail(reason) }
 }
 function newConversation() { conversationId.value = ''; messages.value = []; question.value = ''; focusedMessageId.value = ''; focusedCitationId.value = ''; lastResponse.value = null; traceOpen.value = false }
 async function openConversation(id: string) {
@@ -249,17 +265,24 @@ async function deleteConversation(conversation: Conversation) {
 }
 async function askQuestion() {
   if (!question.value.trim() || chatLoading.value) return
-  const text = question.value.trim(); question.value = ''; chatLoading.value = true; error.value = ''
+  const text = question.value.trim(); question.value = ''; chatLoading.value = true; error.value = ''; chatDraft.value = ''
   const localId = `pending-${Date.now()}`
   messages.value.push({ id: localId, role: 'user', content: text }); scrollMessages()
+  const body = { question: text, knowledge_base_ids: chatKbIds.value, top_k: Number(topK.value), mode: chatMode.value, ...(conversationId.value ? { conversation_id: conversationId.value } : {}) }
+  const serialized = JSON.stringify(body)
+  if (!lastAttempt || lastAttempt.body !== serialized) lastAttempt = { key: crypto.randomUUID(), body: serialized }
+  chatController = new AbortController()
   try {
-    const response = await api<ChatResponse>('/chat', { method: 'POST', body: JSON.stringify({ question: text, knowledge_base_ids: chatKbIds.value, top_k: Number(topK.value), mode: chatMode.value, ...(conversationId.value ? { conversation_id: conversationId.value } : {}) }) })
-    conversationId.value = response.conversation_id; lastResponse.value = response
+    const response = await streamChat({ ...body, request_id: lastAttempt.key }, chatController.signal, token => { chatDraft.value += token; scrollMessages() })
+    conversationId.value = response.conversation_id; lastResponse.value = response; lastAttempt = null
     messages.value.push({ id: response.message_id, role: 'assistant', content: response.answer, citations: response.citations, trace: response.trace })
     focusedMessageId.value = response.message_id
     conversations.value = await api<Conversation[]>('/conversations'); scrollMessages()
-  } catch (reason) { fail(reason); messages.value = messages.value.filter(item => item.id !== localId); question.value = text }
-  finally { chatLoading.value = false }
+  } catch (reason) {
+    if (reason instanceof DOMException && reason.name === 'AbortError') notify('已停止生成。')
+    else fail(reason)
+    messages.value = messages.value.filter(item => item.id !== localId); question.value = text
+  } finally { chatLoading.value = false; chatDraft.value = ''; chatController = null }
 }
 function scrollMessages() { setTimeout(() => messageList.value?.scrollTo({ top: messageList.value.scrollHeight, behavior: 'smooth' }), 80) }
 function focusCitation(messageId: string, citation: Citation) { focusedMessageId.value = messageId; focusedCitationId.value = citation.chunk_id; evidenceOpen.value = true }
@@ -299,6 +322,15 @@ async function runEvaluation() {
     } catch { /* Preserve the actionable error from the original evaluation request. */ }
   } finally { evaluating.value = false }
 }
+let evalPollRunning = false
+async function pollEvaluations() {
+  if (!user.value || evalPollRunning || !evaluations.value.some(item => ['queued', 'running'].includes(item.status))) return
+  evalPollRunning = true
+  try {
+    evaluations.value = await api<Evaluation[]>('/evaluations')
+    if (evaluation.value && ['queued', 'running'].includes(evaluation.value.status)) evaluation.value = await api<Evaluation>(`/evaluations/${evaluation.value.id}`)
+  } catch (reason) { fail(reason) } finally { evalPollRunning = false }
+}
 async function compareBaseline() {
   const cases = validCases(); if (!cases) return
   if (cases.some(item => !item.expected_document_ids?.length)) { error.value = '比较检索命中率前，请为每个用例选择至少一篇期望命中的文档。'; return }
@@ -313,14 +345,16 @@ async function openEvaluation(id: string) {
 async function refreshSystem() { busy.value = true; try { runtime.value = await api<Runtime>('/system'); await checkHealth() } catch (reason) { fail(reason) } finally { busy.value = false } }
 onMounted(async () => {
   await checkHealth()
-  if (localStorage.getItem('zhiheng_token')) {
+  localStorage.removeItem('zhiheng_token')
+  oidcEnabled.value = (await api<{ enabled: boolean }>('/auth/oidc/config').catch(() => ({ enabled: false }))).enabled
+  {
     try { user.value = await api<User>('/auth/me'); await loadWorkspace() }
     catch (reason) { localStorage.removeItem('zhiheng_token'); if (!(reason instanceof ApiError && reason.status === 401)) authError.value = reason instanceof Error ? reason.message : '无法恢复登录' }
   }
   restoring.value = false
-  pollTimer = setInterval(pollJobs, 2500)
+  pollTimer = setInterval(() => { void pollJobs(); void pollEvaluations() }, 2500)
 })
-onUnmounted(() => { clearInterval(pollTimer); clearTimeout(noticeTimer) })
+onUnmounted(() => { clearInterval(pollTimer); clearTimeout(noticeTimer); chatController?.abort() })
 </script>
 
 <template>
@@ -335,7 +369,7 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(noticeTimer) })
     <div class="auth-panel"><div class="auth-card"><span class="eyebrow">YOUR KNOWLEDGE WORKSPACE</span><h2>{{ authMode === 'login' ? '欢迎回来' : '创建你的知识空间' }}</h2><p>{{ authMode === 'login' ? '登录知衡，继续探索你的知识。' : '从第一份文档开始，积累可信赖的知识。' }}</p>
       <div class="auth-tabs"><button :class="{ active: authMode === 'login' }" @click="authMode = 'login'; authError = ''">登录账号</button><button :class="{ active: authMode === 'register' }" @click="authMode = 'register'; authError = ''">注册账号</button></div>
       <form class="auth-form" @submit.prevent="signIn"><label v-if="authMode === 'register'">你的名字<input v-model="auth.name" autocomplete="name" placeholder="如何称呼你" required maxlength="80" /></label><label>邮箱地址<input v-model="auth.email" type="email" autocomplete="email" placeholder="name@company.com" required /></label><label>密码<input v-model="auth.password" type="password" :autocomplete="authMode === 'login' ? 'current-password' : 'new-password'" placeholder="至少 8 位字符" minlength="8" maxlength="128" required /></label><div v-if="authError" class="alert error-alert" role="alert">{{ authError }}</div><button type="submit" class="btn primary auth-submit" :disabled="authenticating"><LoaderCircle v-if="authenticating" :size="17" class="spin" />{{ authenticating ? '正在连接…' : authMode === 'login' ? '进入工作台' : '创建账号并进入' }}<ArrowRight v-if="!authenticating" :size="17" /></button></form>
-      <div class="auth-connect"><span class="status-dot" :class="health"></span>{{ health === 'online' ? '服务已连接' : health === 'checking' ? '正在检测服务' : '服务未连接，请先启动后端' }}<button class="text-button" @click="checkHealth">重新检测</button></div>
+      <a v-if="oidcEnabled" class="btn secondary" :href="`${API_BASE}/auth/oidc/start`">使用企业账号登录</a><div class="auth-connect"><span class="status-dot" :class="health"></span>{{ connectionText() }}<button class="text-button" @click="checkHealth">重新检测</button></div>
     </div><p class="auth-copyright">知衡 · 让知识流动，让答案可信。</p></div>
   </div>
 
@@ -343,31 +377,31 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(noticeTimer) })
     <div v-if="mobileNav" class="sidebar-overlay" @click="mobileNav = false"></div>
     <aside class="sidebar" :class="{ mobile: mobileNav }">
       <button class="brand" @click="go('library')"><span class="brand-mark"><Layers3 :size="23" /></span><span>知衡<small>KNOWLEDGE OS</small></span></button>
-      <div class="workspace-switch"><span class="workspace-avatar">{{ user.name?.slice(0, 1) || '知' }}</span><span><strong>我的知识工作台</strong><small>Personal workspace</small></span><ChevronDown :size="14" /></div>
+      <div class="workspace-switch"><span class="workspace-avatar">{{ user.name?.slice(0, 1) || '知' }}</span><span><strong>我的知识工作台</strong><small>Knowledge workspace</small></span><ChevronDown :size="14" /></div>
       <span class="nav-heading">工作空间 <span>WORKSPACE</span></span>
       <nav><button v-for="item in navItems" :key="item.id" class="nav-link" :class="{ active: view === item.id }" @click="go(item.id)"><component :is="item.icon" :size="19" /><span>{{ item.label }}</span><span v-if="item.id === 'library' && knowledgeBases.length" class="nav-count">{{ knowledgeBases.length }}</span><ChevronRight v-if="view === item.id" class="nav-arrow" :size="15" /></button></nav>
       <div class="sidebar-note"><span class="note-icon"><Sparkles :size="16" /></span><strong>每个答案，都有出处。</strong><p>从原文到洞察，<br>构建你的可信知识网络。</p><button @click="go('chat')">开始一次提问 <ArrowRight :size="14" /></button></div>
       <div class="sidebar-bottom"><button class="nav-link" :class="{ active: view === 'system' }" @click="go('system')"><Settings2 :size="18" /><span>系统与模型</span><span class="status-dot" :class="health"></span></button><div class="profile"><span class="avatar">{{ user.name?.slice(0, 1) || 'U' }}</span><div><strong>{{ user.name || '知识探索者' }}</strong><small :title="user.email">{{ user.email }}</small></div><button class="icon-button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="17" /></button></div></div>
     </aside>
 
-    <div class="main-shell"><header class="topbar"><div class="breadcrumb"><button class="icon-button mobile-menu" aria-label="打开导航" @click="mobileNav = true"><Menu :size="20" /></button><span>工作空间</span><ChevronRight :size="13" /><strong>{{ titles[view] }}</strong></div><div class="topbar-right"><span class="connection"><span class="status-dot" :class="health"></span>{{ health === 'online' ? '服务已连接' : health === 'checking' ? '连接中' : '服务未连接' }}</span><span class="topbar-divider"></span><span class="workspace-label"><ShieldCheck :size="15" /> 私有知识空间</span><span class="avatar small">{{ user.name?.slice(0, 1) || 'U' }}</span></div></header>
+    <div class="main-shell"><header class="topbar"><div class="breadcrumb"><button class="icon-button mobile-menu" aria-label="打开导航" @click="mobileNav = true"><Menu :size="20" /></button><span>工作空间</span><ChevronRight :size="13" /><strong>{{ titles[view] }}</strong></div><div class="topbar-right"><span class="connection"><span class="status-dot" :class="health"></span>{{ connectionText() }}</span><span class="topbar-divider"></span><span class="workspace-label"><ShieldCheck :size="15" /> 私有知识空间</span><span class="avatar small">{{ user.name?.slice(0, 1) || 'U' }}</span></div></header>
       <div v-if="error" class="global-error alert error-alert" role="alert"><span>{{ error }}</span><button class="icon-button" aria-label="关闭错误提示" @click="error = ''"><X :size="16" /></button></div>
 
       <main v-if="view === 'library'" class="page library-page">
         <div class="page-heading"><div><span class="eyebrow">YOUR KNOWLEDGE, CONNECTED</span><h1>知识空间<span class="heading-dot">.</span></h1><p>把分散的文档，转化为随时可用的知识。</p></div><button class="btn primary" @click="showKbModal = true"><Plus :size="17" />新建知识库</button></div>
-        <div class="stats-grid"><div class="stat-card"><span class="stat-icon teal"><Layers3 :size="19" /></span><div><span>知识库</span><strong>{{ knowledgeBases.length }}<small>个</small></strong></div><span class="stat-caption">按主题组织知识</span></div><div class="stat-card"><span class="stat-icon blue"><FileText :size="19" /></span><div><span>文档总量</span><strong>{{ documents.length }}<small>份</small></strong></div><span class="stat-caption">{{ bytes(totalSize) }} 已存储</span></div><div class="stat-card"><span class="stat-icon violet"><Database :size="19" /></span><div><span>知识分块</span><strong>{{ chunkCount.toLocaleString() }}<small>段</small></strong></div><span class="stat-caption">可检索的知识单元</span></div><div class="stat-card"><span class="stat-icon amber"><FileCheck2 :size="19" /></span><div><span>就绪文档</span><strong>{{ readyDocuments }}<small>份</small></strong></div><span class="stat-caption">已完成解析与索引</span></div></div>
+        <div class="stats-grid"><div class="stat-card"><span class="stat-icon teal"><Layers3 :size="19" /></span><div><span>知识库</span><strong>{{ knowledgeBases.length }}<small>个</small></strong></div><span class="stat-caption">按主题组织知识</span></div><div class="stat-card"><span class="stat-icon blue"><FileText :size="19" /></span><div><span>文档总量</span><strong>{{ documents.length }}<small>份</small></strong></div><span class="stat-caption">{{ bytes(totalSize) }} 已存储</span></div><div class="stat-card"><span class="stat-icon violet"><Database :size="19" /></span><div><span>知识分块</span><strong>{{ chunkCount.toLocaleString() }}<small>段</small></strong></div><span class="stat-caption">可检索的知识单元</span></div><div class="stat-card"><span class="stat-icon amber"><FileCheck2 :size="19" /></span><div><span>可用文档</span><strong>{{ readyDocuments }}<small>份</small></strong></div><span class="stat-caption">已发布且有效的版本</span></div></div>
         <section class="section-block"><div class="section-heading"><h2>我的知识库 <span>{{ knowledgeBases.length }}</span></h2><button class="text-button" :disabled="busy" @click="loadWorkspace"><RefreshCw :size="14" :class="{ spin: busy }" /> 刷新</button></div>
           <div v-if="busy && !knowledgeBases.length" class="empty-card"><LoaderCircle class="spin" :size="25" /><p>正在加载知识空间…</p></div>
           <div v-else-if="!knowledgeBases.length" class="empty-card kb-empty"><span class="empty-icon"><FolderOpen :size="30" /></span><h3>为你的知识，建立第一个空间</h3><p>创建知识库后，上传产品手册、研究资料或团队文档。</p><button class="btn primary" @click="showKbModal = true"><Plus :size="16" />创建知识库</button></div>
           <div v-else class="kb-grid"><button v-for="(kb, index) in knowledgeBases" :key="kb.id" class="kb-card" :class="{ selected: selectedKbId === kb.id }" @click="selectKb(kb.id)"><div class="kb-card-top"><span class="kb-icon" :class="['teal', 'blue', 'violet', 'amber'][index % 4]"><BookOpen :size="21" /></span><span class="kb-selected"><Check v-if="selectedKbId === kb.id" :size="14" /><ChevronRight v-else :size="16" /></span></div><h3>{{ kb.name }}</h3><p>{{ kb.description || '让相关文档在这里汇集，成为可追溯的知识。' }}</p><div class="kb-meta"><span><FileText :size="13" />{{ kb.document_count }} 份文档</span><span>{{ date(kb.created_at).split(' ')[0] }}</span></div></button></div>
         </section>
-        <section class="document-panel"><div class="document-heading"><div><h2>{{ selectedKb?.name || '文档管理' }}<span class="subtle-tag">文档</span></h2><p>{{ selectedKb?.description || '上传并管理知识库中的原始文档' }}</p></div><div class="button-row"><button v-if="selectedKb" class="icon-button danger-button" title="删除当前知识库" aria-label="删除当前知识库" :disabled="deleting === selectedKbId" @click="removeKb"><Trash2 :size="17" /></button><button class="btn secondary" :disabled="!selectedKbId || uploading" @click="fileInput?.click()"><UploadCloud :size="16" />上传文档</button></div></div>
+        <section class="document-panel"><div class="document-heading"><div><h2>{{ selectedKb?.name || '文档管理' }}<span class="subtle-tag">文档</span></h2><p>{{ selectedKb?.description || '上传并管理知识库中的原始文档' }}</p></div><div class="button-row"><button v-if="selectedKb && selectedKb.role === 'admin'" class="icon-button danger-button" title="删除当前知识库" aria-label="删除当前知识库" :disabled="deleting === selectedKbId" @click="removeKb"><Trash2 :size="17" /></button><button class="btn secondary" :disabled="!selectedKbId || uploading || selectedKb?.role === 'reader'" @click="fileInput?.click()"><UploadCloud :size="16" />上传文档</button></div></div>
           <input ref="fileInput" type="file" multiple class="hidden" accept=".pdf,.docx,.txt,.md,.csv,.json,.html,.htm,.png,.jpg,.jpeg,.webp" @change="uploadFiles(($event.target as HTMLInputElement).files)" />
-          <button class="upload-zone" :class="{ dragging, disabled: !selectedKbId || uploading }" :disabled="!selectedKbId || uploading" @click="fileInput?.click()" @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="uploadFiles($event.dataTransfer?.files || null)"><span class="upload-illustration"><LoaderCircle v-if="uploading" :size="25" class="spin" /><UploadCloud v-else :size="26" /></span><span><strong>{{ uploading ? '正在提交文件…' : '将文件拖到这里，或' }} <em v-if="!uploading">点击上传</em></strong><small>PDF、Word、文本、图片等多格式 · 单文件不超过 {{ runtime?.max_upload_mb || 50 }} MB</small></span><span class="upload-tag">异步解析 · 自动索引</span></button>
+          <button class="upload-zone" :class="{ dragging, disabled: !selectedKbId || uploading }" :disabled="!selectedKbId || uploading || selectedKb?.role === 'reader'" @click="fileInput?.click()" @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="uploadFiles($event.dataTransfer?.files || null)"><span class="upload-illustration"><LoaderCircle v-if="uploading" :size="25" class="spin" /><UploadCloud v-else :size="26" /></span><span><strong>{{ uploading ? '正在提交文件…' : '将文件拖到这里，或' }} <em v-if="!uploading">点击上传</em></strong><small>PDF、Word、文本、图片等多格式 · 单文件不超过 {{ runtime?.max_upload_mb || 50 }} MB</small></span><span class="upload-tag">异步解析 · 自动索引</span></button>
           <div class="table-toolbar"><span>文档列表 <strong>{{ selectedDocuments.length }}</strong></span><label class="search-input"><Search :size="16" /><input v-model="documentQuery" placeholder="搜索文档名称…" aria-label="搜索文档" /></label></div>
-          <div class="table-scroll"><table class="documents-table"><thead><tr><th>文档名称</th><th>状态</th><th>知识分块</th><th>上传时间</th><th class="align-right">操作</th></tr></thead><tbody><tr v-for="doc in filteredDocuments" :key="doc.id"><td><div class="document-name"><span class="file-icon"><FileText :size="21" /></span><div><button class="doc-link" @click="openPreview(doc)">{{ doc.name }}</button><small>{{ bytes(doc.size_bytes) }} <span v-if="doc.error" class="document-error" :title="doc.error">· {{ doc.error }}</span></small></div></div></td><td><span class="status-badge" :class="doc.status"><span class="status-dot"></span>{{ statusText(doc.status) }}</span><div v-if="!['ready','completed','failed'].includes(doc.status) && progress(doc)" class="progress-bar"><span :style="{ width: `${progress(doc)}%` }"></span></div></td><td class="muted tabular">{{ doc.chunk_count || '—' }}<small v-if="doc.chunk_count"> 段</small></td><td class="muted tabular">{{ date(doc.created_at) }}</td><td><div class="table-actions"><button v-if="doc.status === 'failed'" class="icon-button" title="重试解析" aria-label="重试解析" @click="retryDocument(doc)"><RefreshCw :size="16" /></button><button class="icon-button" title="查看解析内容" aria-label="查看解析内容" :disabled="previewLoading && previewingId === doc.id" @click="openPreview(doc)"><LoaderCircle v-if="previewLoading && previewingId === doc.id" :size="16" class="spin" /><FileSearch v-else :size="16" /></button><button class="icon-button" title="下载原文" aria-label="下载原文" @click="download(doc.id, doc.name)"><ArrowDownToLine :size="16" /></button><button class="icon-button danger-button" title="删除文档" aria-label="删除文档" :disabled="deleting === doc.id" @click="removeDocument(doc)"><Trash2 :size="15" /></button></div></td></tr></tbody></table></div>
+          <div class="table-scroll"><table class="documents-table"><thead><tr><th>文档名称</th><th>状态</th><th>知识分块</th><th>上传时间</th><th class="align-right">操作</th></tr></thead><tbody><tr v-for="doc in filteredDocuments" :key="doc.id"><td><div class="document-name"><span class="file-icon"><FileText :size="21" /></span><div><button class="doc-link" @click="openPreview(doc)">{{ doc.name }}</button><small>{{ bytes(doc.size_bytes) }} <span v-if="doc.error" class="document-error" :title="doc.error">· {{ doc.error }}</span></small></div></div></td><td><span class="status-badge" :class="doc.status"><span class="status-dot"></span>{{ documentStatus(doc) }}</span><div v-if="!['ready','completed','failed'].includes(doc.status) && progress(doc)" class="progress-bar"><span :style="{ width: `${progress(doc)}%` }"></span></div></td><td class="muted tabular">{{ doc.chunk_count || '—' }}<small v-if="doc.chunk_count"> 段</small></td><td class="muted tabular">{{ date(doc.created_at) }}</td><td><div class="table-actions"><button v-if="canWrite(doc) && ['failed', 'ready'].includes(doc.status)" class="icon-button" :title="doc.status === 'ready' ? '重新索引' : '重试解析'" :aria-label="doc.status === 'ready' ? '重新索引' : '重试解析'" @click="retryDocument(doc)"><RefreshCw :size="16" /></button><button class="icon-button" title="版本与有效期" aria-label="版本与有效期" @click="versionDocument = doc"><Clock3 :size="16" /></button><button class="icon-button" title="查看解析内容" aria-label="查看解析内容" :disabled="previewLoading && previewingId === doc.id" @click="openPreview(doc)"><LoaderCircle v-if="previewLoading && previewingId === doc.id" :size="16" class="spin" /><FileSearch v-else :size="16" /></button><button class="icon-button" title="下载原文" aria-label="下载原文" @click="download(doc.id, doc.name)"><ArrowDownToLine :size="16" /></button><button v-if="canWrite(doc)" class="icon-button danger-button" title="删除文档" aria-label="删除文档" :disabled="deleting === doc.id" @click="removeDocument(doc)"><Trash2 :size="15" /></button></div></td></tr></tbody></table></div>
           <div v-if="!filteredDocuments.length" class="table-empty"><FileText :size="29" /><h3>{{ documentQuery ? '没有找到匹配文档' : '知识积累，从第一份文档开始' }}</h3><p>{{ documentQuery ? '试试其他关键词。' : selectedKbId ? '上传一份文档，系统将自动解析、切块并建立索引。' : '先创建一个知识库，再上传你的文档。' }}</p></div>
-          <div class="table-footer"><span><ShieldCheck :size="14" />文档与检索结果仅对当前账号可见</span><span>共 {{ filteredDocuments.length }} 份文档</span></div>
+          <div class="table-footer"><span><ShieldCheck :size="14" />文档与检索结果按知识库授权范围可见</span><span>共 {{ filteredDocuments.length }} 份文档</span></div>
         </section>
         <div class="page-footer"><span>KNOWLEDGE BECOMES CLARITY.</span><p>知衡 · 连接知识与答案</p></div>
       </main>
@@ -378,11 +412,11 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(noticeTimer) })
             <details class="scope-selector"><summary><Layers3 :size="14" /><span>{{ chatKbIds.length ? `已选择 ${chatKbIds.length} 个知识库` : '检索全部知识库' }}</span><ChevronDown :size="13" /></summary><div class="scope-options"><p>选择检索范围；不勾选时检索全部知识库。</p><label v-for="kb in knowledgeBases" :key="kb.id"><input type="checkbox" :checked="chatKbIds.includes(kb.id)" :disabled="chatLoading" @change="toggleId(chatKbIds, kb.id)" />{{ kb.name }}</label><span v-if="!knowledgeBases.length" class="muted">还没有知识库，请先上传文档。</span><label class="top-k">返回证据数量<select v-model="topK" :disabled="chatLoading"><option :value="3">3 段</option><option :value="5">5 段</option><option :value="8">8 段</option><option :value="10">10 段</option></select></label></div></details>
             <div ref="messageList" class="messages"><div v-if="historyLoading" class="chat-loading"><LoaderCircle class="spin" :size="24" />正在读取会话…</div><div v-else-if="!messages.length" class="chat-welcome"><span class="welcome-symbol"><Sparkles :size="31" /></span><span class="eyebrow">FROM KNOWLEDGE TO CLARITY</span><h1>你的知识，<br>值得一个好答案。</h1><p>向你的文档提问。每个回答都附带来源证据，<br>让洞察可以回到原文，让答案可以被验证。</p><div class="welcome-features"><span><Search :size="15" />混合检索</span><span><FileSearch :size="15" />原文引用</span><span><Layers3 :size="15" />推理轨迹</span></div><button v-if="!readyDocuments" class="text-button" @click="go('library')">先去上传一份文档 <ArrowRight :size="15" /></button></div>
               <article v-for="message in messages" :key="message.id" class="message" :class="message.role"><span class="message-avatar"><Sparkles v-if="message.role === 'assistant'" :size="18" /><span v-else>{{ user.name?.slice(0, 1) || '我' }}</span></span><div class="message-body"><div class="message-author">{{ message.role === 'assistant' ? '知衡助手' : user.name || '我' }}<small v-if="message.role === 'assistant'">基于知识库证据</small></div><div class="message-content">{{ message.content }}</div><div v-if="message.citations?.length" class="message-citations"><button v-for="(citation, index) in message.citations" :key="citation.chunk_id" :class="{ active: focusedMessageId === message.id && focusedCitationId === citation.chunk_id }" @click="focusCitation(message.id, citation)"><span>{{ index + 1 }}</span>{{ citation.document_name }}<small v-if="citation.page">P{{ citation.page }}</small></button></div><button v-if="message.role === 'assistant'" class="message-evidence-button" @click="focusedMessageId = message.id; traceOpen = true; evidenceOpen = true"><Layers3 :size="12" />查看检索轨迹 <ChevronRight :size="12" /></button><button v-if="message.role === 'assistant'" class="message-evaluation-button" @click="addHistoryCase(message)"><FlaskConical :size="12" />加入评测</button></div></article>
-              <div v-if="chatLoading" class="message assistant"><span class="message-avatar"><Sparkles :size="18" /></span><div class="thinking"><span></span><span></span><span></span><small>正在检索证据并组织答案…</small></div></div>
+              <article v-if="chatLoading && chatDraft" class="message assistant"><div class="message-body"><div class="message-author">知衡助手<small>生成中 · 待引用校验</small></div><div class="message-content">{{ chatDraft }}</div></div></article><div v-if="chatLoading" class="message assistant"><span class="message-avatar"><Sparkles :size="18" /></span><div class="thinking"><span></span><span></span><span></span><small>正在检索证据并组织答案…</small></div></div>
             </div>
-            <div class="composer-wrap"><div v-if="lastResponse" class="response-meta"><span><CheckCheck :size="12" />{{ lastResponse.provider }}</span><span v-if="lastResponse.cached">缓存命中</span><span>{{ lastResponse.citations.length }} 处来源</span></div><form class="composer" @submit.prevent="askQuestion"><textarea v-model="question" placeholder="提问，让知识给出答案…" aria-label="输入问题" rows="2" maxlength="8000" :disabled="chatLoading || historyLoading" @keydown.enter.exact.prevent="askQuestion" /><div class="composer-bottom"><span><ShieldCheck :size="13" />基于你的私有知识库回答</span><button class="send-button" type="submit" aria-label="发送问题" :disabled="!question.trim() || chatLoading || historyLoading"><LoaderCircle v-if="chatLoading" :size="18" class="spin" /><ArrowUp v-else :size="19" /></button></div></form><p class="composer-note">Enter 发送 · Shift + Enter 换行 · 请结合原文核实重要信息</p></div>
+            <div class="composer-wrap"><button v-if="chatLoading" class="btn secondary" type="button" @click="chatController?.abort()">停止生成</button><div v-if="lastResponse" class="response-meta"><span><CheckCheck :size="12" />{{ lastResponse.provider }}</span><span v-if="lastResponse.cached">缓存命中</span><span v-if="lastResponse.verification">{{ lastResponse.abstained ? '证据不足 · 已拒答' : !lastResponse.verification.passed ? '已回退原文摘录' : lastResponse.verification.semantic_checked ? '事实核验通过' : lastResponse.verification.mode === 'numeric' ? '数字核对通过' : '原文摘录' }}</span><span>{{ lastResponse.citations.length }} 处来源</span></div><form class="composer" @submit.prevent="askQuestion"><textarea v-model="question" placeholder="提问，让知识给出答案…" aria-label="输入问题" rows="2" maxlength="8000" :disabled="chatLoading || historyLoading" @keydown.enter.exact.prevent="askQuestion" /><div class="composer-bottom"><span><ShieldCheck :size="13" />基于你的私有知识库回答</span><button class="send-button" type="submit" aria-label="发送问题" :disabled="!question.trim() || chatLoading || historyLoading"><LoaderCircle v-if="chatLoading" :size="18" class="spin" /><ArrowUp v-else :size="19" /></button></div></form><p class="composer-note">Enter 发送 · Shift + Enter 换行 · 请结合原文核实重要信息</p></div>
           </section>
-          <div v-if="evidenceOpen" class="evidence-drawer-backdrop" @click="evidenceOpen = false"></div><aside class="evidence-panel" :class="{ open: evidenceOpen }"><button class="icon-button evidence-close" aria-label="关闭证据栏" @click="evidenceOpen = false"><X :size="18" /></button><div class="evidence-heading"><h3><FileSearch :size="17" />参考证据</h3><span>{{ evidence.length }}</span></div><p class="evidence-description">答案的每一步，都能找到依据。</p><div v-if="!evidence.length" class="evidence-empty"><div class="evidence-paper"><FileSearch :size="34" /></div><h4>等待发现相关知识</h4><p>提问后，相关文档片段、<br>来源页码与检索轨迹将在这里展示。</p></div><div v-else class="evidence-list"><article v-for="(citation, index) in evidence" :key="citation.chunk_id" class="evidence-card" :class="{ focused: focusedCitationId === citation.chunk_id }"><div class="evidence-card-title"><span>{{ index + 1 }}</span><strong>{{ citation.document_name }}</strong></div><div class="evidence-card-meta"><span>{{ citation.page ? `第 ${citation.page} 页` : '来源文档片段' }}</span><span v-if="Number.isFinite(citation.score)" :title="'检索排序分数，不代表准确率'">排序分 {{ citation.score.toFixed(4) }}</span></div><p>{{ citation.text }}</p><button class="text-button" @click="download(citation.document_id, citation.document_name)">查看原文 <ArrowDownToLine :size="12" /></button></article></div><details class="trace-panel" :open="traceOpen"><summary @click.prevent="traceOpen = !traceOpen"><Layers3 :size="15" />检索轨迹 <span>{{ trace.length }} 步</span><ChevronDown :size="13" /></summary><div v-if="!trace.length" class="trace-empty">运行一次问答后展示真实检索过程。</div><ol v-else><li v-for="(item, index) in trace" :key="index"><strong>{{ item.step }}</strong><pre>{{ display(item.detail) }}</pre></li></ol></details></aside>
+          <div v-if="evidenceOpen" class="evidence-drawer-backdrop" @click="evidenceOpen = false"></div><aside class="evidence-panel" :class="{ open: evidenceOpen }"><button class="icon-button evidence-close" aria-label="关闭证据栏" @click="evidenceOpen = false"><X :size="18" /></button><div class="evidence-heading"><h3><FileSearch :size="17" />参考证据</h3><span>{{ evidence.length }}</span></div><p class="evidence-description">答案的每一步，都能找到依据。</p><div v-if="!evidence.length" class="evidence-empty"><div class="evidence-paper"><FileSearch :size="34" /></div><h4>等待发现相关知识</h4><p>提问后，相关文档片段、<br>来源页码与检索轨迹将在这里展示。</p></div><div v-else class="evidence-list"><article v-for="(citation, index) in evidence" :key="citation.chunk_id" class="evidence-card" :class="{ focused: focusedCitationId === citation.chunk_id }"><div class="evidence-card-title"><span>{{ index + 1 }}</span><strong>{{ citation.document_name }}</strong></div><div class="evidence-card-meta"><span>{{ citation.page ? `第 ${citation.page} 页` : '来源文档片段' }}</span><span v-if="Number.isFinite(citation.score)" :title="'检索排序分数，不代表准确率'">排序分 {{ citation.score.toFixed(4) }}</span></div><p>{{ citation.text }}</p><button class="text-button" @click="download(citation.document_id, citation.document_name, citation.revision_id)">查看原文 <ArrowDownToLine :size="12" /></button></article></div><details class="trace-panel" :open="traceOpen"><summary @click.prevent="traceOpen = !traceOpen"><Layers3 :size="15" />检索轨迹 <span>{{ trace.length }} 步</span><ChevronDown :size="13" /></summary><div v-if="!trace.length" class="trace-empty">运行一次问答后展示真实检索过程。</div><ol v-else><li v-for="(item, index) in trace" :key="index"><strong>{{ item.step }}</strong><pre>{{ display(item.detail) }}</pre></li></ol></details></aside>
         </div></main>
 
       <main v-else-if="view === 'evaluations'" class="page evaluation-page"><div class="page-heading"><div><span class="eyebrow">MEASURE WHAT MATTERS</span><h1>评测中心<span class="heading-dot">.</span></h1><p>用真实测试用例，衡量检索与回答的每一次进步。</p></div><span class="outline-chip"><FlaskConical :size="15" />Evidence over assumptions</span></div>
@@ -395,10 +429,10 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(noticeTimer) })
         <div class="evaluation-results-layout"><section class="panel evaluation-results"><div class="section-heading"><h2>评测结果</h2><span v-if="evaluation" class="status-badge" :class="evaluation.status"><span class="status-dot"></span>{{ statusText(evaluation.status) }}</span></div><div v-if="evaluationLoading" class="empty-card"><LoaderCircle :size="22" class="spin" /><p>正在读取评测结果…</p></div><div v-else-if="!evaluation" class="empty-card"><span class="empty-icon"><FlaskConical :size="28" /></span><h3>让数据，给出判断</h3><p>运行评测或选择历史记录，查看真实指标与逐条结果。</p></div><template v-else><div class="result-title"><h3>{{ evaluation.name }}</h3><span>{{ date(evaluation.created_at) }}</span></div><div v-if="evaluation.error" class="alert error-alert">{{ evaluation.error }}</div><div v-if="Object.keys(evaluation.metrics || {}).length" class="result-metrics"><div v-for="(value, key) in evaluation.metrics" :key="key"><span>{{ metricNames[String(key)] || key }}</span><strong>{{ metric(value) }}</strong></div></div><p v-else class="muted result-note">当前运行尚未返回指标。</p><details v-for="(result, index) in evaluation.results || []" :key="index" class="case-result"><summary><span class="case-number">{{ index + 1 }}</span><strong>{{ result.question || `用例 ${index + 1}` }}</strong><ChevronDown :size="15" /></summary><dl><template v-for="(value, key) in result" :key="key"><dt>{{ metricNames[String(key)] || key }}</dt><dd><pre>{{ display(value) }}</pre></dd></template></dl></details></template></section><aside class="panel evaluation-history"><div class="section-heading"><h2>历史运行</h2><span>{{ evaluations.length }}</span></div><div v-if="!evaluations.length" class="history-empty"><Clock3 :size="25" /><p>评测运行记录<br>会自动保存在这里。</p></div><button v-for="run in evaluations" :key="run.id" class="evaluation-history-item" :class="{ active: evaluation?.id === run.id }" @click="openEvaluation(run.id)"><span class="history-run-icon"><FlaskConical :size="16" /></span><span><strong>{{ run.name }}</strong><small>{{ date(run.created_at) }} · {{ statusText(run.status) }}</small></span><ChevronRight :size="14" /></button></aside></div>
       </main>
 
-      <main v-else class="page system-page"><div class="page-heading"><div><span class="eyebrow">TRANSPARENT BY DESIGN</span><h1>系统与模型<span class="heading-dot">.</span></h1><p>了解当前运行环境，让每一项能力都有真实依据。</p></div><button class="btn secondary" :disabled="busy" @click="refreshSystem"><RefreshCw :size="15" :class="{ spin: busy }" />刷新状态</button></div><div class="runtime-banner"><span class="stat-icon teal"><ShieldCheck :size="25" /></span><div><h3>{{ runtime ? `当前运行模式：${runtime.mode}` : '暂未读取到运行状态' }}</h3><p>下列配置直接来自后端。演示模式、模型供应商与可选能力均按真实运行状态展示。</p></div><span class="status-badge" :class="health === 'online' ? 'ready' : 'failed'"><span class="status-dot"></span>{{ health === 'online' ? '已连接' : '未连接' }}</span></div><div v-if="runtime" class="provider-grid"><div v-for="provider in [{ name: 'Embedding', label: '文本向量模型', icon: Database, value: runtime.embedding_model ? `${runtime.embedding_provider} · ${runtime.embedding_model}` : runtime.embedding_provider }, { name: 'Language model', label: '回答生成模型', icon: Sparkles, value: runtime.llm_backend ? `${runtime.llm_backend} · ${runtime.llm_model || runtime.llm_provider}` : runtime.llm_provider }, { name: 'Reranker', label: '重排模型', icon: Layers3, value: runtime.reranker }, { name: 'Vector store', label: '向量存储', icon: Database, value: runtime.vector_store }, { name: 'Task queue', label: '异步任务队列', icon: Clock3, value: runtime.queue }]" :key="provider.name" class="panel provider-card"><component :is="provider.icon" :size="22" /><span class="eyebrow">{{ provider.name }}</span><h3>{{ provider.label }}</h3><pre>{{ display(provider.value) }}</pre></div></div><section v-if="runtime" class="panel feature-panel"><div class="section-heading"><h2>运行能力</h2><span class="outline-chip">LIVE CONFIGURATION</span></div><div class="feature-list"><div v-for="(value, key) in runtime.features" :key="key"><span>{{ key }}</span><span v-if="typeof value === 'boolean'" class="feature-value" :class="{ enabled: value }"><Check v-if="value" :size="14" />{{ value ? '已启用' : '未启用' }}</span><pre v-else>{{ display(value) }}</pre></div><div><span>单文件上传上限</span><strong>{{ runtime.max_upload_mb }} MB</strong></div><div><span>前端 API 地址</span><code>{{ API_BASE }}</code></div></div></section><div class="configuration-help"><CircleHelp :size="20" /><div><h3>需要切换模型或启用进阶能力？</h3><p>在项目根目录的 .env 中配置模型、Qdrant、Redis、OCR 或重排模型后，重启后端服务。密钥仅保存在服务端。</p></div></div></main>
+      <GovernancePanel v-else-if="view === 'governance'" :on-changed="loadWorkspace" /><main v-else class="page system-page"><div class="page-heading"><div><span class="eyebrow">TRANSPARENT BY DESIGN</span><h1>系统与模型<span class="heading-dot">.</span></h1><p>了解当前运行环境，让每一项能力都有真实依据。</p></div><button class="btn secondary" :disabled="busy" @click="refreshSystem"><RefreshCw :size="15" :class="{ spin: busy }" />刷新状态</button></div><div class="runtime-banner"><span class="stat-icon teal"><ShieldCheck :size="25" /></span><div><h3>{{ runtime ? `当前运行模式：${runtime.mode}` : '暂未读取到运行状态' }}</h3><p>下列配置直接来自后端。演示模式、模型供应商与可选能力均按真实运行状态展示。</p></div><span class="status-badge" :class="health === 'online' ? 'ready' : 'failed'"><span class="status-dot"></span>{{ health === 'online' ? '已连接' : '未连接' }}</span></div><div v-if="runtime" class="provider-grid"><div v-for="provider in [{ name: 'Embedding', label: '文本向量模型', icon: Database, value: runtime.embedding_model ? `${runtime.embedding_provider} · ${runtime.embedding_model}` : runtime.embedding_provider }, { name: 'Language model', label: '回答生成模型', icon: Sparkles, value: runtime.llm_backend ? `${runtime.llm_backend} · ${runtime.llm_model || runtime.llm_provider}` : runtime.llm_provider }, { name: 'Reranker', label: '重排模型', icon: Layers3, value: runtime.reranker }, { name: 'Vector store', label: '向量存储', icon: Database, value: runtime.vector_store }, { name: 'Task queue', label: '异步任务队列', icon: Clock3, value: runtime.queue }]" :key="provider.name" class="panel provider-card"><component :is="provider.icon" :size="22" /><span class="eyebrow">{{ provider.name }}</span><h3>{{ provider.label }}</h3><pre>{{ display(provider.value) }}</pre></div></div><section v-if="runtime" class="panel feature-panel"><div class="section-heading"><h2>运行能力</h2><span class="outline-chip">LIVE CONFIGURATION</span></div><div class="feature-list"><div v-for="(value, key) in runtime.features" :key="key"><span>{{ key }}</span><span v-if="typeof value === 'boolean'" class="feature-value" :class="{ enabled: value }"><Check v-if="value" :size="14" />{{ value ? '已启用' : '未启用' }}</span><pre v-else>{{ display(value) }}</pre></div><div><span>单文件上传上限</span><strong>{{ runtime.max_upload_mb }} MB</strong></div><div><span>前端 API 地址</span><code>{{ API_BASE }}</code></div></div></section><div class="configuration-help"><CircleHelp :size="20" /><div><h3>需要切换模型或启用进阶能力？</h3><p>在项目根目录的 .env 中配置模型、Qdrant、Redis、OCR 或重排模型后，重启后端服务。密钥仅保存在服务端。</p></div></div></main>
     </div>
 
-    <div v-if="showKbModal" class="modal-backdrop" @click.self="showKbModal = false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="kb-modal-title"><div class="modal-header"><span class="stat-icon teal"><BookOpen :size="22" /></span><button class="icon-button" aria-label="关闭" @click="showKbModal = false"><X :size="19" /></button></div><h2 id="kb-modal-title">新建知识库</h2><p>给相关的知识一个专属空间。</p><form @submit.prevent="createKb"><label>知识库名称<input v-model="kbForm.name" placeholder="例如：产品与技术文档" required maxlength="120" autofocus /></label><label>描述 <small>选填</small><textarea v-model="kbForm.description" rows="3" maxlength="1000" placeholder="简单介绍这个知识库的内容和用途" /></label><div class="modal-actions"><button type="button" class="btn secondary" @click="showKbModal = false">取消</button><button type="submit" class="btn primary" :disabled="creatingKb || !kbForm.name.trim()"><LoaderCircle v-if="creatingKb" class="spin" :size="15" />创建知识库<ArrowRight v-if="!creatingKb" :size="15" /></button></div></form></section></div>
+    <DocumentVersions v-if="versionDocument" :document="versionDocument" :writable="canWrite(versionDocument)" :on-changed="refreshDocuments" @close="versionDocument = null" /><div v-if="showKbModal" class="modal-backdrop" @click.self="showKbModal = false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="kb-modal-title"><div class="modal-header"><span class="stat-icon teal"><BookOpen :size="22" /></span><button class="icon-button" aria-label="关闭" @click="showKbModal = false"><X :size="19" /></button></div><h2 id="kb-modal-title">新建知识库</h2><p>给相关的知识一个专属空间。</p><form @submit.prevent="createKb"><label>所属空间<select v-model="kbForm.organization_id"><option value="">个人空间</option><option v-for="org in organizations.filter(item => item.role !== 'reader')" :key="org.id" :value="org.id">{{ org.name }}</option></select></label><label v-if="kbForm.organization_id">可见范围<select v-model="kbForm.visibility"><option value="organization">组织全员可见</option><option value="restricted">仅指定成员可见</option></select></label><label>知识库名称<input v-model="kbForm.name" placeholder="例如：产品与技术文档" required maxlength="120" autofocus /></label><label>描述 <small>选填</small><textarea v-model="kbForm.description" rows="3" maxlength="1000" placeholder="简单介绍这个知识库的内容和用途" /></label><div class="modal-actions"><button type="button" class="btn secondary" @click="showKbModal = false">取消</button><button type="submit" class="btn primary" :disabled="creatingKb || !kbForm.name.trim()"><LoaderCircle v-if="creatingKb" class="spin" :size="15" />创建知识库<ArrowRight v-if="!creatingKb" :size="15" /></button></div></form></section></div>
     <div v-if="preview" class="modal-backdrop" @click.self="preview = null"><section class="modal preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title"><div class="modal-header"><span class="stat-icon blue"><FileText :size="22" /></span><button class="icon-button" aria-label="关闭预览" @click="preview = null"><X :size="19" /></button></div><h2 id="preview-title">{{ preview.document.name }}</h2><p>{{ preview.chunks.length }} 个知识分块 · {{ bytes(preview.document.size_bytes) }}</p><div class="preview-chunks"><div v-for="chunk in preview.chunks" :key="chunk.id"><span class="eyebrow">CHUNK {{ chunk.ordinal + 1 }} <small v-if="chunk.page">· 第 {{ chunk.page }} 页</small></span><p>{{ chunk.text }}</p></div><div v-if="!preview.chunks.length" class="empty-card"><FileSearch :size="28" /><h3>暂无解析内容</h3><p>{{ preview.document.status === 'failed' ? preview.document.error : '文档处理完成后，知识分块将在这里展示。' }}</p></div></div><div class="modal-actions"><button class="btn secondary" @click="preview = null">关闭</button><button class="btn primary" @click="download(preview.document.id, preview.document.name)"><ArrowDownToLine :size="15" />下载原文</button></div></section></div>
     <div v-if="notice" class="toast" role="status"><span><Check :size="16" /></span>{{ notice }}<button class="icon-button" aria-label="关闭提示" @click="notice = ''"><X :size="15" /></button></div>
   </div>

@@ -24,6 +24,27 @@ class RegisterRequest(LoginRequest):
 class KnowledgeBaseRequest(StrictRequest):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
+    organization_id: str | None = None
+    visibility: Literal["organization", "restricted"] = "organization"
+
+
+class OrganizationRequest(StrictRequest):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class MemberRequest(StrictRequest):
+    email: str = Field(min_length=3, max_length=254)
+    role: Literal["admin", "editor", "reader"] = "reader"
+
+
+class DocumentMetadataRequest(StrictRequest):
+    expires_at: str | None = Field(default=None, max_length=64)
+    source: str = Field(default="upload", max_length=2000)
+
+
+class SourceSyncRequest(StrictRequest):
+    knowledge_base_id: str
+    relative_path: str = Field(min_length=1, max_length=500)
 
 
 class ChatRequest(StrictRequest):
@@ -32,6 +53,7 @@ class ChatRequest(StrictRequest):
     top_k: int = Field(default=5, ge=1, le=20)
     mode: Literal["standard", "agent"] = "standard"
     conversation_id: str | None = None
+    request_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class EvaluationCase(StrictRequest):

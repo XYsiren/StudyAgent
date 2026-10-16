@@ -58,6 +58,19 @@ def request(client, method, path, label=None, **kwargs):
     if response.status_code >= 400:
         # Do not print a raw response: provider errors can include secrets.
         raise SmokeFailure(f"{label or path} 返回 HTTP {response.status_code}")
+    if response.status_code == 202 and path == "evaluations":
+        run = response.json()
+        with progress("异步评测"):
+            deadline = time.monotonic() + client.timeout.read
+            while time.monotonic() < deadline:
+                response = client.get("evaluations/" + run["id"])
+                require(response.is_success, "异步评测状态查询失败")
+                run = response.json()
+                if run["status"] in {"completed", "failed", "restricted"}:
+                    require(run["status"] == "completed", "异步评测未完成，请查看评测记录")
+                    return run
+                time.sleep(2)
+            raise SmokeFailure("异步评测等待超时")
     return response.json() if response.content else None
 
 
@@ -105,7 +118,8 @@ def wait_job(client, job_id, timeout):
 def validate_answer(answer, chunks, kb_id, expected_document, expected_text, model):
     require(expected_text in answer.get("answer", ""), f"答案缺少预期事实 {expected_text}")
     require(bool(answer.get("citations")), "答案没有来源引用")
-    require(answer.get("provider") == model, "答案未使用已配置的真实模型")
+    require(model in answer.get("provider", "") and answer.get("usage", {}).get("model_calls", 0) >= 1,
+            "未执行已配置真实模型或来源核验回退")
     allowed = {chunk["id"]: chunk for chunk in chunks}
     for citation in answer["citations"]:
         require(citation.get("chunk_id") in allowed, "引用片段不属于本次知识库")

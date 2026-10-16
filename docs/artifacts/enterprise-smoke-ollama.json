@@ -1,0 +1,164 @@
+{
+  "executed_at": "2026-10-16T08:28:17.010629+00:00",
+  "status": "passed",
+  "ragas_requested": true,
+  "test_scope": "真实本地 Ollama + PostgreSQL + Redis + Qdrant；两份虚构示例文档、一条标注案例",
+  "runtime": {
+    "mode": "development",
+    "embedding_provider": "ollama",
+    "embedding_model": "qwen3-embedding:8b",
+    "llm_backend": "ollama",
+    "llm_model": "qwen3.5:9b",
+    "queue": "redis+sql-durable",
+    "vector_store": "qdrant-server",
+    "reranker": "disabled"
+  },
+  "documents": {
+    "company-handbook.md": {
+      "sha256": "2a561778eb85cc9b25129279fce30d1e7d83d54e848683f55004bf79d0477cb0",
+      "chunk_count": 1,
+      "deduplicated": true
+    },
+    "product-guide.md": {
+      "sha256": "08ca1846cc2ba207797c3002b05ae2579bd1b8f85bb03163935ecb1f010ae345",
+      "chunk_count": 1,
+      "deduplicated": true
+    }
+  },
+  "vectors": {
+    "collection": "rag_assistant_e5b3b4d296e1",
+    "embedding_dimension": 4096,
+    "sql_vector_chunk_match": true,
+    "nonzero_vector": true
+  },
+  "standard": {
+    "answer": "根据提供的资料，员工出差住宿报销上限为每人每晚500元 [1]。",
+    "provider": "qwen3.5:9b",
+    "citation_count": 1,
+    "cached": false,
+    "usage": {
+      "input_tokens": 355,
+      "output_tokens": 21,
+      "total_tokens": 376,
+      "model_calls": 2,
+      "verifier": {
+        "input_tokens": 653,
+        "output_tokens": 27,
+        "total_tokens": 680
+      }
+    }
+  },
+  "followup": {
+    "answer": "报销申请最晚应在出差结束后的30个自然日内提交 [1]。超过该期限须补充部门负责人书面说明。",
+    "same_conversation": true,
+    "history_messages": 4,
+    "citation_count": 1
+  },
+  "agent": {
+    "answer": "根据提供的资料，员工出差住宿报销上限为每人每晚500元 [1]。",
+    "citation_count": 1,
+    "trace_steps": [
+      "scope",
+      "retrieve",
+      "plan",
+      "grade",
+      "grade",
+      "context_budget",
+      "generate"
+    ]
+  },
+  "answer_cache": {
+    "hit": true,
+    "identical_answer": true
+  },
+  "retrieval_comparison": {
+    "dense": {
+      "hit_at_5": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "labeled_cases": 1,
+      "total_cases": 1,
+      "latency_ms": 65.09
+    },
+    "hybrid": {
+      "hit_at_5": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "labeled_cases": 1,
+      "total_cases": 1,
+      "latency_ms": 74.87
+    },
+    "relative_hit_rate_change": 0.0,
+    "case_count": 1,
+    "note": "仅两份示例语料的一条标注案例；不能据此宣称普遍性能提升。"
+  },
+  "evaluation": {
+    "status": "completed",
+    "metrics": {
+      "hit_at_5": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "labeled_cases": 1,
+      "total_cases": 1,
+      "latency_ms": 739.33,
+      "ragas_enabled": true,
+      "history_replayed_cases": 0,
+      "reference_token_recall": 1.0,
+      "faithfulness": 0.5,
+      "answer_relevancy": 0.945118618626014,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0,
+      "judge_cached_cases": 0,
+      "judge_scored_cases": 1
+    }
+  },
+  "history_evaluation": {
+    "metrics": {
+      "hit_at_5": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "labeled_cases": 1,
+      "total_cases": 1,
+      "latency_ms": 0.05,
+      "ragas_enabled": false,
+      "history_replayed_cases": 1,
+      "reference_token_recall": 1.0
+    },
+    "identical_answer": true,
+    "provider": "recorded"
+  },
+  "ragas_cache_replay": {
+    "metrics": {
+      "hit_at_5": 1.0,
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "labeled_cases": 1,
+      "total_cases": 1,
+      "latency_ms": 0.04,
+      "ragas_enabled": true,
+      "history_replayed_cases": 1,
+      "reference_token_recall": 1.0,
+      "faithfulness": 0.5,
+      "answer_relevancy": 0.945118618626014,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0,
+      "judge_cached_cases": 1,
+      "judge_scored_cases": 0
+    },
+    "identical_scores": true
+  },
+  "checks": {
+    "real_embeddings": true,
+    "persisted_chunks": true,
+    "valid_citations": true,
+    "standard_answer": true,
+    "bounded_agent_answer": true,
+    "multi_turn_history": true,
+    "answer_cache": true,
+    "dense_hybrid_comparison": true,
+    "historical_answer_replay": true,
+    "real_ragas_four_metrics": true,
+    "ragas_judge_cache": true
+  },
+  "elapsed_seconds": 65.88
+}

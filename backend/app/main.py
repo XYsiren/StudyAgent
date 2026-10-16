@@ -1,5 +1,7 @@
 import logging
 import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
@@ -23,18 +25,19 @@ class UploadLimitMiddleware:
         self.app, self.settings = app, settings
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("path") != "/api/documents/upload":
+        if scope["type"] != "http" or scope.get("method") not in {"POST", "PUT", "PATCH"}:
             return await self.app(scope, receive, send)
         # 1 MB is reserved for multipart field names and boundaries; the file
         # itself has a separate exact size check in the upload handler.
-        maximum = (self.settings.max_upload_mb + 1) * 1024 * 1024
+        upload = scope.get("path") == "/api/documents/upload"
+        maximum = ((self.settings.max_upload_mb + 1) if upload else 4) * 1024 * 1024
         length = dict(scope.get("headers", [])).get(b"content-length", b"0")
         try:
             too_large = int(length) > maximum
         except ValueError:
             return await JSONResponse({"detail": "Content-Length 无效"}, status_code=400)(scope, receive, send)
         if too_large:
-            return await JSONResponse({"detail": f"文档不能超过 {self.settings.max_upload_mb} MB"},
+            return await JSONResponse({"detail": "上传文件或请求体超过大小限制"},
                                       status_code=413)(scope, receive, send)
         received = 0
 
@@ -44,7 +47,7 @@ class UploadLimitMiddleware:
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > maximum:
-                    raise HTTPException(413, f"文档不能超过 {self.settings.max_upload_mb} MB")
+                    raise HTTPException(413, "上传文件或请求体超过大小限制")
             return message
 
         return await self.app(scope, bounded_receive, send)
@@ -60,22 +63,24 @@ def create_app(settings=None):
         database = Database(settings)
         app.state.database = database
         database.initialize()
-        # Evaluation is synchronous. A process crash must leave an explicit
-        # failed run, never a permanently running result or invented metrics.
+        # Recover legacy synchronous runs; new queued evaluations carry a lease.
         from sqlalchemy import update
 
         from app.models import EvaluationRun, utcnow
         with database.session() as db:
             db.execute(update(EvaluationRun).where(EvaluationRun.status == "running",
+                       EvaluationRun.lease_token.is_(None),
                        EvaluationRun.created_at < utcnow() - timedelta(hours=2)).values(
                 status="failed", error="服务重启中断了评测，请重新运行"))
             db.commit()
         stop = threading.Event()
+        app.state.worker_stop = stop
         worker = None
         if not settings.redis_url:
             worker = threading.Thread(target=run_worker, args=(database, settings, stop), daemon=True,
                                       name="rag-ingestion-worker")
             worker.start()
+        app.state.worker_thread = worker
         try:
             yield
         finally:
@@ -86,19 +91,40 @@ def create_app(settings=None):
 
     app = FastAPI(title="知衡 · RAG Knowledge Assistant", version=__version__, lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins,
-                       allow_credentials=False, allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-                       allow_headers=["Authorization", "Content-Type"])
+                       allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH", "OPTIONS"],
+                       allow_headers=["Authorization", "Content-Type", "X-RAG-Request"])
     app.add_middleware(UploadLimitMiddleware, settings=settings)
 
     @app.middleware("http")
     async def security_headers(request, call_next):
+        request.state.request_id = uuid.uuid4().hex
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and request.cookies.get("rag_session") and not request.headers.get("Authorization"):
+            origin = request.headers.get("Origin")
+            if (origin and origin not in [*settings.cors_origins, settings.public_base_url.rstrip("/")]) or request.headers.get("Sec-Fetch-Site") == "cross-site":
+                return JSONResponse({"detail": "跨站请求被拒绝"}, status_code=403)
+            if not request.url.path.startswith("/api/auth/") and request.headers.get("X-RAG-Request") != "1":
+                return JSONResponse({"detail": "请求缺少防跨站标记"}, status_code=403)
+        started = time.perf_counter()
         response = await call_next(request)
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        from app.services.observability import LATENCY, REQUESTS
+        REQUESTS.labels(request.method, route, str(response.status_code)).inc()
+        LATENCY.labels(route).observe(time.perf_counter() - started)
+        import json
+        logger.info(json.dumps({"event": "http", "request_id": request.state.request_id,
+            "method": request.method, "route": route, "status": response.status_code,
+            "headers_latency_ms": round((time.perf_counter() - started) * 1000, 2)}))
+        response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Cache-Control"] = "no-store"
         return response
 
     app.include_router(router)
+    from app.api.enterprise import router as enterprise_router
+    app.include_router(enterprise_router)
+    from app.api.oidc import router as oidc_router
+    app.include_router(oidc_router)
     return app
 
 

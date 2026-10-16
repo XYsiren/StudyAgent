@@ -1,5 +1,7 @@
 .git
 .env*
+.secrets
+.test-tmp
 **/node_modules
 **/dist
 **/__pycache__

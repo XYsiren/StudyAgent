@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import uuid
+from contextlib import nullcontext
 from functools import lru_cache
 
 from qdrant_client import QdrantClient, models
@@ -35,10 +36,10 @@ def point_id(chunk_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, chunk_id))
 
 
-def index_chunks(chunks: list[dict]) -> None:
+def index_chunks(chunks: list[dict], write_fence=None) -> None:
     if not chunks:
         return
-    with _lock:
+    with _lock if not get_settings().qdrant_url else nullcontext():
         store, name = client(), collection()
         if not store.collection_exists(name):
             store.create_collection(name, vectors_config=models.VectorParams(size=dimension(), distance=models.Distance.COSINE))
@@ -50,19 +51,30 @@ def index_chunks(chunks: list[dict]) -> None:
             vectors = embed([c["text"] for c in batch])
             points = [models.PointStruct(id=point_id(c["id"]), vector=v, payload={
                 "chunk_id": c["id"], "document_id": c["document_id"], "knowledge_base_id": c["knowledge_base_id"],
+                "revision_id": c.get("revision_id"),
             }) for c, v in zip(batch, vectors, strict=True)]
-            store.upsert(name, points, wait=True)
+            # Only vector writes are fenced; expensive embedding holds no SQL lock.
+            with write_fence() if write_fence else nullcontext():
+                store.upsert(name, points, wait=True)
 
 
 def delete_document(document_id: str) -> None:
+    delete_revision(document_id)
+
+
+def delete_revision(document_id: str, revision_id: str | None = None) -> None:
     with _lock:
         store = client()
         # Clean old model collections too, so switching embeddings never resurrects deleted content.
         for item in store.get_collections().collections:
             if item.name.startswith(get_settings().qdrant_collection_prefix + "_"):
-                store.delete(item.name, models.FilterSelector(filter=models.Filter(must=[
-                    models.FieldCondition(key="document_id", match=models.MatchValue(value=document_id))
-                ])), wait=True)
+                conditions = [models.FieldCondition(key="document_id", match=models.MatchValue(value=document_id))]
+                if revision_id:
+                    version = models.FieldCondition(key="revision_id", match=models.MatchValue(value=revision_id))
+                    legacy = str(uuid.uuid5(uuid.NAMESPACE_URL, "legacy-revision:" + document_id))
+                    empty = models.IsEmptyCondition(is_empty=models.PayloadField(key="revision_id"))
+                    conditions.append(models.Filter(should=[version, empty]) if revision_id == legacy else version)
+                store.delete(item.name, models.FilterSelector(filter=models.Filter(must=conditions)), wait=True)
 
 
 @lru_cache(maxsize=1)
@@ -88,24 +100,50 @@ def retrieve(question: str, chunks: list[dict], top_k: int = 5, strategy: str = 
     if strategy not in {"hybrid", "dense", "bm25"}:
         raise ValueError("strategy must be hybrid, dense or bm25")
     top_k = max(1, min(top_k, 20))
-    by_id = {c["id"]: c for c in chunks}
+    from app.services.corpus import CorpusScope
+    lazy = isinstance(chunks, CorpusScope)
+    by_id = {} if lazy else {c["id"]: c for c in chunks}
     limit = min(len(chunks), max(20, top_k * 4))
     dense, sparse = [], []
     dense_scores, sparse_scores = {}, {}
     if strategy != "bm25":
-        with _lock:
+        vector = embed([question])[0]
+        with _lock if not get_settings().qdrant_url else nullcontext():
             store, name = client(), collection()
             if not store.collection_exists(name):
                 raise ValueError("当前 embedding 配置尚无索引，请重新索引文档（失败/就绪文档均可重试）")
             # Authorization is applied BEFORE vector ranking, down to the exact allowed chunk IDs.
-            scope = models.Filter(must=[models.HasIdCondition(has_id=[point_id(i) for i in by_id])])
-            hits = store.query_points(name, query=embed([question])[0], query_filter=scope, limit=limit).points
+            scope = chunks.dense_filter() if lazy else models.Filter(must=[models.HasIdCondition(has_id=[point_id(i) for i in by_id])])
+            hits = store.query_points(name, query=vector, query_filter=scope, limit=min(limit * 4, 320) if lazy else limit).points
+        if lazy:
+            # SQL is authoritative for active revision and expiry even during a cleanup outage.
+            by_id.update(chunks.hydrate([(h.payload or {}).get("chunk_id") for h in hits]))
         for hit in hits:
             cid = (hit.payload or {}).get("chunk_id")
             if cid in by_id and hit.score > 0:
                 dense.append(cid)
                 dense_scores[cid] = float(hit.score)
     if strategy != "dense":
+        if lazy:
+            sparse, sparse_scores = chunks.sparse(question, limit)
+            by_id.update(chunks.hydrate(sparse))
+        else:
+            sparse, sparse_scores = _small_corpus_sparse(question, chunks, limit)
+    dense = dense[:limit]
+    fused = {}
+    for ranking in (dense, sparse):
+        for rank, cid in enumerate(ranking, 1):
+            fused[cid] = fused.get(cid, 0.0) + 1 / (60 + rank)
+    ids = sorted(fused, key=lambda cid: fused[cid], reverse=True)[:limit]
+    result = [{**by_id[cid], "chunk_id": cid, "score": fused[cid], "retrieval_score": fused[cid],
+               "dense_score": dense_scores.get(cid), "bm25_score": sparse_scores.get(cid)} for cid in ids]
+    return rerank_candidates(question, result, top_k) if rerank_results and strategy == "hybrid" else result[:top_k]
+
+
+def _small_corpus_sparse(question, chunks, limit):
+    """Explicit in-memory fixture/demo adapter; production uses SQL posting lists."""
+    sparse, sparse_scores = [], {}
+    if chunks:
         corpus = [tokenize(c["text"]) or ["__empty__"] for c in chunks]
         # BM25 can return negative IDF for tiny corpora. Positive floor keeps useful common terms.
         bm25 = BM25Okapi(corpus)
@@ -118,11 +156,4 @@ def retrieve(question: str, chunks: list[dict], top_k: int = 5, strategy: str = 
             if score > 0:
                 sparse.append(c["id"])
                 sparse_scores[c["id"]] = float(score)
-    fused = {}
-    for ranking in (dense, sparse):
-        for rank, cid in enumerate(ranking, 1):
-            fused[cid] = fused.get(cid, 0.0) + 1 / (60 + rank)
-    ids = sorted(fused, key=lambda cid: fused[cid], reverse=True)[:limit]
-    result = [{**by_id[cid], "chunk_id": cid, "score": fused[cid], "retrieval_score": fused[cid],
-               "dense_score": dense_scores.get(cid), "bm25_score": sparse_scores.get(cid)} for cid in ids]
-    return rerank_candidates(question, result, top_k) if rerank_results and strategy == "hybrid" else result[:top_k]
+    return sparse, sparse_scores

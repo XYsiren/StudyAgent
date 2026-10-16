@@ -8,8 +8,8 @@
 
 ```mermaid
 flowchart TD
-    UI[Vue 3 / TypeScript] --> API[FastAPI / Bearer 身份认证]
-    API --> ACL[校验知识库、文档和会话归属]
+    UI[Vue 3 / TypeScript] --> API[FastAPI / Cookie / Bearer / OIDC]
+    API --> ACL[组织角色 / 知识库授权 / 会话访问]
     ACL --> SQL[(PostgreSQL / 开发可用 SQLite)]
     ACL --> Upload[流式上传 / 限额校验 / SHA256 去重]
     Upload --> Files[原文件存储]
@@ -23,7 +23,7 @@ flowchart TD
     Chunk --> Embedding[语义向量模型]
     Embedding --> Qdrant[(Qdrant 向量索引)]
     Worker --> SQL
-    ACL --> Scope[授权范围内的就绪片段]
+    ACL --> Scope[授权范围 / 活动版本 / 有效期]
     Scope --> Cache{答案缓存}
     Cache -->|未命中| Recall[Dense + BM25 / RRF]
     Qdrant --> Recall
@@ -34,7 +34,7 @@ flowchart TD
     Answer --> SQL
     Answer --> UI
     Cache -->|命中| UI
-    Scope --> Eval[检索对比 / Ragas 评测]
+    Scope --> Eval[异步评测 Worker / 检索对比 / Ragas]
     Eval --> SQL
 ```
 
@@ -44,11 +44,13 @@ API 负责账户、知识库、文档与对话接口；Worker 执行解析和索
 
 ## 身份与知识范围
 
-账户密码使用带随机盐的 PBKDF2-SHA256；服务签发带有效期的 HMAC Bearer token。生产配置校验签名密钥，拒绝开发默认值。
+账户使用 PBKDF2-SHA256 密码与可撤销服务端会话。浏览器使用 HttpOnly Cookie，接口也支持显式 Bearer token。Cookie 请求执行来源与跨站标记检查；企业登录可接入 OIDC Authorization Code + PKCE。
 
-查询范围从 SQL 中确定：服务先校验所选知识库归属，再加载当前用户且文档状态为 ready 的片段。空知识库列表表示该账户的全部知识库。Qdrant 使用 HasIdCondition 在排名前限制可参与检索的 point ID；BM25 使用相同的授权片段集合。API 返回前再次核对引用 chunk ID，使向量召回、词项召回和答案引用使用一致的范围。实现见 [scoped_chunks](../backend/app/api/routes.py)与 [retrieve](../backend/app/services/retrieval.py)。
+知识库支持个人空间、组织全员可见和指定成员可见。组织成员及知识库授权分别提供管理员、编辑、只读角色。统一访问策略用于文档、检索、引用、历史与评测，移除成员或授权后不再提供其旧来源内容。
 
-系统规则与 sources 分开传递，文档、OCR、视觉转录及历史消息均作为数据处理。会话历史从服务端读取并校验归属，只保留 user、assistant 角色；引用编号检查用于保持回答与来源之间的对应关系。
+`CorpusScope` 在 SQL 中确定当前授权的活动版本及有效期。Qdrant 按允许知识库的 payload 过滤进行召回，SQL 再验证候选 chunk 的活动版本与有效性；词项检索在相同范围的倒排词频上计算 BM25。只有命中候选回查正文，不按全库分块列表构建请求过滤器。
+
+版本切换和清理之间，向量服务可能暂时包含旧版本点；它们不能通过 SQL 候选验证。Dense 采用有界候选窗口，长期清理失败仍可能降低召回，因此需要监控清理任务并执行对账。授权与版本更新会改变缓存指纹，长模型调用完成后再次核对权限与会话状态。
 
 ## 文档生命周期
 
@@ -75,11 +77,15 @@ stateDiagram-v2
     completed --> queued: 创建重新索引任务
 ```
 
-默认每 2 秒扫描任务，租约为 600 秒，心跳间隔不超过 15 秒，具体参数见 [Settings](../backend/app/config.py)。任务状态、进度和错误通过文档列表及 /api/jobs/{id} 提供。失败路径清理部分 SQL 与向量数据，删除和索引通过数据库写入协调。
+默认每 2 秒扫描任务，租约为 600 秒，心跳不超过 15 秒。解析和 Embedding 不持有 SQL 写锁；向量批次写入使用短事务围栏，与删除和租约替换协调。新版本完成向量写入、SQL 分块和倒排词频后，在同一事务切换活动版本；失败时继续提供旧版。
+
+文档删除在 SQL 事务中移除可见记录并保存 CleanupTask。外部向量和文件删除由 Worker 执行，失败后按退避重试，保留任务状态。旧版本索引回收保留原文件及版本元数据，恢复版本时重新建立索引。管理命令可对账孤立向量。
+
+异步评测使用独立的持久运行状态和租约；Compose 分开运行摄取 Worker 与评测 Worker。Redis 的通知列表有长度和有效期限制，SQL 始终负责恢复任务。
 
 ## 混合检索与证据编排
 
-Dense 检索使用 Qdrant cosine 相似度，词项检索使用 jieba 分词和 BM25Okapi。小语料中的非正 IDF 使用正值下限，使少量文档也能形成有效词项匹配。两路结果按 chunk ID 去重并进行 RRF 融合：
+Dense 检索使用 Qdrant cosine 相似度，生产查询使用入库时保存的 jieba 词频倒排，SQL 在授权活动版本内计算 BM25（k1=1.2、b=0.75、正 IDF）。内存 BM25Okapi 仅保留给独立小语料适配与测试。两路结果按 chunk ID 去重并进行 RRF 融合：
 
 ```text
 RRF(chunk) = Σ 1 / (60 + rank_in_each_list)
@@ -95,11 +101,11 @@ CrossEncoder 由 RAG_RERANKER_MODEL 启用。该模式聚焦知识检索编排�
 
 检索上下文读取最近 6 条历史消息，每条最多 1600 字符。短追问或带指代的问题会结合上一轮用户问题形成检索输入，让对话延续已有主题。
 
-答案缓存键包含问题、模式、top_k、模型与接口、提示词版本、历史，以及授权语料的片段 ID、文档名、页码与正文。语料更新或范围变化会改变缓存键。Redis 缓存按 TTL 过期；本地缓存最多保留 128 项，默认 TTL 为 3600 秒。命中结果通过 cached 与 usage 字段体现。
+答案缓存键包含问题、模式、top_k、模型与接口、提示词版本、历史，以及当前允许知识库、语料代次和有效片段数量。语料更新或范围变化会改变缓存键。Redis 缓存按 TTL 过期；本地缓存最多保留 128 项，默认 TTL 为 3600 秒。命中结果通过 cached 与 usage 字段体现。
 
 生成前，系统从 ollama_num_ctx 中扣除 max_output_tokens 和固定开销预留，以 UTF-8 字节数保守分配输入预算。发送历史进一步收缩为最近 4 条、每条 600 字节；证据按最终排名装入，末条可裁剪，引用正文与实际发送内容保持一致。超过问题及历史预算时返回明确错误。OpenAI 兼容服务也使用这一预算参数，应按所选模型的上下文窗口设置。
 
-未配置生成模型时提供原文摘录模式；配置后通过 [LangChain 适配器](../backend/app/services/answering.py)调用模型。回答使用 [n] 来源编号，越界编号被清除；没有有效引用的输出退回原文摘录。
+未配置生成模型时提供原文摘录模式；配置后通过 [LangChain 适配器](../backend/app/services/answering.py)调用模型。回答使用 [n] 来源编号，越界编号被清除；没有有效引用的非拒答输出退回原文摘录。数字校验和可选 LLM 核验进一步检查事实支持；证据不足则拒答。实时 SSE 传输供应商草稿，核验后的结果作为唯一完成消息持久化。
 
 ## 模型与存储配置
 
@@ -124,17 +130,12 @@ CrossEncoder 由 RAG_RERANKER_MODEL 启用。该模式聚焦知识检索编排�
 
 历史评测通过 message_id 读取当前账户的已保存答案与引用，支持对同一回答反复评估；实时检索评测用于观察当前语料与配置。Ragas 判断缓存包含问题、答案、上下文、reference、模型与协议版本，只保存四项均有效的分数，并记录 judge_cached_cases、judge_scored_cases。评测执行采用单并发及有界超时、重试，控制模型资源占用。
 
-## 设计取舍与扩展方向
+## 治理、可观测性与发布
 
-| 当前实现 | 扩展方向 |
-| --- | --- |
-| DOCX、文本和独立图片使用逻辑页；DOCX page=1 | 需要物理页定位时转换为 PDF，或引入布局解析器 |
-| SSE 在完整答案生成入库后回放 sources、trace、token、done | 接入供应商原生流式协议，缩短首段内容等待时间 |
-| SQLAlchemy create_all 初始化数据表 | 为持续版本升级引入 Alembic 迁移与回滚流程 |
-| 账户拥有知识库，检索按账户隔离 | 增加组织、团队 RBAC、共享 ACL 与 SSO |
-| BM25 在请求内重建，SQL 加载授权片段，Qdrant 按片段 ID 过滤 | 面向更大语料建立持久化稀疏索引与服务端范围过滤 |
-| SQL 租约恢复与失败清理协调多个存储 | 增加跨存储对账、故障演练与更多运行指标 |
-| 同步评测接口及持久化运行结果 | 为大批量评测引入独立作业调度 |
-| 字节预算、词项覆盖率和引用编号校验 | 增加模型分词器预算与语义证据校验 |
+SQL 原子计数和过期并发槽实现跨 API 副本的限流、容量与请求预算。问答有请求幂等键及会话租约，消息记录提示词、模型配置、来源版本、实际用量、核验结果与阶段耗时。审计只保存操作人与资源标识，不记录密码、令牌或文档正文。
 
-自动化测试见 [test_api.py](../backend/tests/test_api.py)与 [test_services.py](../backend/tests/test_services.py)。检索质量、模型判断、缓存收益和运行容量分别使用对应数据集与环境评估，便于比较不同模型、语料和部署配置。
+`/api/health` 用于进程存活，`/api/ready` 检查 SQL、Redis、Qdrant 和 Worker 心跳，`/api/ready/models` 提供受登录保护的模型 API 探针。受独立凭证保护的 Prometheus 端点导出请求、阶段耗时、队列与恢复指标。HTTP 请求关联 ID 与生成运行元数据可以关联排障。
+
+Alembic 接管原有表结构并保留原分块 ID，将已有内容迁移为来源版本和持久倒排。Compose 先完成迁移，再启动应用与 Worker。离线维护命令协调 SQL、文件和向量快照，使用校验清单、空目标保护以及恢复后查询验证。
+
+完整操作与边界见[团队治理与可靠性](enterprise.md)和[部署指南](deployment.md)。

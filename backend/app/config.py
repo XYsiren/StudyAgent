@@ -45,6 +45,28 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = Field(default=2.0, gt=0)
     job_lease_seconds: int = Field(default=600, ge=30)
     token_lifetime_seconds: int = Field(default=86400, ge=60)
+    auto_migrate: bool = True
+    allow_registration: bool = True
+    auth_rate_per_minute: int = Field(default=20, ge=1)
+    chat_rate_per_minute: int = Field(default=30, ge=1)
+    user_storage_mb: int = Field(default=1024, ge=1)
+    max_pending_jobs: int = Field(default=20, ge=1)
+    max_active_chats: int = Field(default=2, ge=1, le=32)
+    global_active_chats: int = Field(default=4, ge=1, le=128)
+    worker_role: str = "all"
+    user_daily_model_requests: int = Field(default=500, ge=1)
+    worker_max_attempts: int = Field(default=3, ge=1, le=10)
+    metrics_token: str = ""
+    cookie_secure: bool = False
+    public_base_url: str = "http://localhost:5173"
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_redirect_uri: str = "http://localhost:5173/api/auth/oidc/callback"
+    citation_verifier: str = "numeric"  # numeric | llm; numeric is explicitly a partial check
+    verifier_model: str = ""
+    evidence_min_coverage: float = Field(default=0.25, ge=0, le=1)
+    source_sync_root: Path | None = None
 
     @model_validator(mode="after")
     def validate_runtime(self):
@@ -54,6 +76,12 @@ class Settings(BaseSettings):
             raise ValueError("ollama_num_ctx must leave at least 2048 tokens beyond max_output_tokens")
         if self.redis_url and not self.qdrant_url:
             raise ValueError("A standalone Redis worker requires a Qdrant server; local Qdrant is single-process")
+        if self.citation_verifier not in {"numeric", "llm"}:
+            raise ValueError("citation_verifier must be numeric or llm")
+        if self.worker_role not in {"all", "ingestion", "evaluation"}:
+            raise ValueError("worker_role must be all, ingestion or evaluation")
+        if self.oidc_issuer and (not self.oidc_issuer.startswith("https://") or not self.oidc_client_id):
+            raise ValueError("OIDC requires an HTTPS issuer and client_id")
         if self.environment.lower() == "production":
             if len(self.secret_key) < 32 or self.secret_key.startswith("development-only"):
                 raise ValueError("Production requires a unique RAG_SECRET_KEY of at least 32 characters")

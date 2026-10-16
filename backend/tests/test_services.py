@@ -10,6 +10,7 @@ from app.services.parsing import ParsedPage, chunk_pages, parse_document
 
 @pytest.fixture
 def local_services(tmp_path, monkeypatch):
+    monkeypatch.setenv("RAG_CITATION_VERIFIER", "numeric")
     for name in ("REDIS_URL", "QDRANT_URL", "LLM_API_KEY", "LLM_MODEL", "RERANKER_MODEL"):
         monkeypatch.setenv("RAG_" + name, "")
     monkeypatch.setenv("RAG_DATA_DIR", str(tmp_path))

@@ -3,33 +3,8 @@ import time
 from datetime import timedelta
 
 import pytest
-from app.config import Settings, get_settings
-from app.main import create_app
+from app.config import Settings
 from app.models import Document, IngestionJob, utcnow
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("RAG_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("RAG_DATABASE_URL", "sqlite:///" + (tmp_path / "test.db").as_posix())
-    monkeypatch.setenv("RAG_WORKER_POLL_SECONDS", "0.03")
-    monkeypatch.setenv("RAG_EMBEDDING_PROVIDER", "hash")
-    monkeypatch.setenv("RAG_LLM_MODEL", "")
-    monkeypatch.setenv("RAG_LLM_API_KEY", "")
-    monkeypatch.setenv("RAG_REDIS_URL", "")
-    monkeypatch.setenv("RAG_QDRANT_URL", "")
-    monkeypatch.setenv("RAG_ENVIRONMENT", "development")
-    monkeypatch.setenv("RAG_RERANKER_MODEL", "")
-    get_settings.cache_clear()
-    from app.services.retrieval import client as vector_client
-    vector_client.cache_clear()
-    with TestClient(create_app()) as test_client:
-        yield test_client
-    if vector_client.cache_info().currsize:
-        vector_client().close()
-        vector_client.cache_clear()
-    get_settings.cache_clear()
 
 
 def register(client, email="owner@example.com"):
@@ -48,10 +23,21 @@ def test_history_replay_scopes_saved_message_and_reuses_answer(client):
     forbidden = client.post("/api/evaluations", headers=other, json={"name": "越权复评", "cases": [case]})
     assert forbidden.status_code == 404
     replay = client.post("/api/evaluations", headers=owner, json={"name": "历史复评", "cases": [case]})
-    assert replay.status_code == 201, replay.text
-    row = replay.json()["results"][0]
+    assert replay.status_code == 202, replay.text
+    row = wait_evaluation(client, owner, replay.json()["id"])["results"][0]
     assert row["answer"] == chat["answer"] and row["question"] == "年假有几天"
     assert row["from_history"] and row["retrieval_basis"] == "recorded"
+
+
+def wait_evaluation(client, headers, run_id):
+    for _ in range(200):
+        response = client.get('/api/evaluations/' + run_id, headers=headers)
+        assert response.status_code == 200, response.text
+        result = response.json()
+        if result['status'] in {'completed', 'failed'}:
+            return result
+        time.sleep(0.05)
+    pytest.fail('Evaluation did not finish')
 
 
 def create_kb(client, headers, name="员工制度"):
@@ -120,6 +106,10 @@ def test_upload_ingestion_deduplication_scope_and_cleanup(client):
         path = Path(db.get(Document, document_id).stored_path)
     assert path.parent.name == "uploads" and path.name != "leave.txt"
     assert client.delete(f"/api/documents/{document_id}", headers=owner).status_code == 204
+    for _ in range(100):
+        if not path.exists():
+            break
+        time.sleep(0.05)
     assert not path.exists()
     assert client.get(f"/api/jobs/{job_id}", headers=owner).status_code == 404
     assert client.get("/api/documents", headers=owner).json() == []
@@ -176,8 +166,8 @@ def test_chat_history_citations_evaluation_and_cross_user_isolation(client):
     cases = [{"question": "年假是多少天", "reference": "十五天", "expected_document_ids": [doc_id]}]
     evaluation = client.post("/api/evaluations", headers=owner,
                              json={"name": "真实标注测试", "cases": cases, "knowledge_base_ids": [kb]})
-    assert evaluation.status_code == 201, evaluation.text
-    run = evaluation.json()
+    assert evaluation.status_code == 202, evaluation.text
+    run = wait_evaluation(client, owner, evaluation.json()["id"])
     assert run["status"] == "completed" and run["metrics"]["hit_at_5"] == 1
     assert run["metrics"]["ragas_enabled"] is False and "faithfulness" not in run["metrics"]
     assert client.get("/api/evaluations/" + run["id"], headers=other).status_code == 404

@@ -1,0 +1,27 @@
+{
+  "storage": [
+    "PostgreSQL",
+    "Redis",
+    "Qdrant server"
+  ],
+  "isolated": true,
+  "tests": {
+    "tests": 49,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1
+  },
+  "backup": {
+    "files": 3,
+    "collections": 1,
+    "integrity_checked": true
+  },
+  "restore": {
+    "restored": true,
+    "collections": 1,
+    "files_verified": 3,
+    "retrieval_after_restore": true,
+    "original_file_download": true
+  },
+  "passed": true
+}

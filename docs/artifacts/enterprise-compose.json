@@ -1,0 +1,20 @@
+{
+  "mode": "isolated Docker Compose",
+  "model_mode": "hash embeddings / extractive answers",
+  "checks": {
+    "dependency_readiness": {
+      "database": true,
+      "worker": true,
+      "redis": true,
+      "qdrant": true
+    },
+    "frontend_proxy": true,
+    "cookie_auth_and_csrf_header": true,
+    "standalone_ingestion_worker": true,
+    "chat_and_citations": true,
+    "standalone_evaluation_worker": true,
+    "authenticated_metrics": true,
+    "session_revocation": true
+  },
+  "passed": true
+}
