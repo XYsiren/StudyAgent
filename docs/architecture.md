@@ -1,137 +1,140 @@
-# 知衡的运行架构与边界
+# 系统架构
 
-本文记录当前代码实现，更新于 2026-10-15。项目把截图要求的文档摄取、混合检索、多模态与评测闭环，结合 KnowAgenticRAG 的有界检索编排思路，独立实现为 FastAPI + Vue 应用。功能与参考来源的逐项映射见[需求与来源说明](requirements-and-provenance.md)。
+知衡以文档为知识入口，以可追溯的证据组织回答，将知识库管理、异步摄取、混合检索、对话与评测连接为完整工作流。系统采用 FastAPI + Vue 架构，支持本地模型和 OpenAI 兼容服务，面向文档密集的私有知识管理场景。
 
-## 一次请求经过哪些组件
+设计目标与技术选型见[设计原则与技术参考](design.md)，运行方式见[部署指南](deployment.md)。
+
+## 组件与数据流
 
 ```mermaid
 flowchart TD
     UI[Vue 3 / TypeScript] --> API[FastAPI / Bearer 身份认证]
-    API --> ACL[按当前用户校验知识库、文档和会话归属]
+    API --> ACL[校验知识库、文档和会话归属]
     ACL --> SQL[(PostgreSQL / 开发可用 SQLite)]
-    ACL --> Upload[限额流式上传 / SHA256 去重]
-    Upload --> Files[UUID 文件名 / uploads 原文件]
+    ACL --> Upload[流式上传 / 限额校验 / SHA256 去重]
+    Upload --> Files[原文件存储]
     Upload --> Jobs[SQL 持久化任务]
-    Jobs --> Notify[Redis 通知队列]
-    Jobs --> Worker[Worker / 原子租约 / 心跳 / 过期恢复]
+    Jobs --> Notify[Redis 唤醒通知]
+    Jobs --> Worker[Worker / 租约 / 心跳 / 过期恢复]
     Notify --> Worker
     Files --> Worker
-    Worker --> Parse[PDF / DOCX / 文本 / OCR / 视觉转录]
-    Parse --> Chunk[保留页码的递归切块]
-    Chunk --> Embedding[Ollama / SentenceTransformers / OpenAI 兼容向量]
+    Worker --> Parse[文档解析 / OCR / 视觉转录]
+    Parse --> Chunk[保留来源的递归切块]
+    Chunk --> Embedding[语义向量模型]
     Embedding --> Qdrant[(Qdrant 向量索引)]
     Worker --> SQL
-    ACL --> Scope[当前授权且 ready 的片段集合]
-    Scope --> Cache{问题、历史、模型、语料指纹缓存}
-    Cache -->|未命中| Recall[Dense + 中文 BM25 / RRF]
+    ACL --> Scope[授权范围内的就绪片段]
+    Scope --> Cache{答案缓存}
+    Cache -->|未命中| Recall[Dense + BM25 / RRF]
     Qdrant --> Recall
-    Recall --> Agent[可选有界改写 / 候选融合]
-    Agent --> Rerank[可选 CrossEncoder / 最终一次精排]
-    Rerank --> Answer[证据预算 / 引用编号 / LLM 或明确标注的摘录]
-    Answer --> CacheStore[Redis TTL / 进程内有界缓存]
+    Recall --> Agent[可选有界检索编排]
+    Agent --> Rerank[最终一次 CrossEncoder 精排]
+    Rerank --> Answer[上下文预算 / 生成 / 引用校验]
+    Answer --> CacheStore[Redis TTL / 进程内缓存]
     Answer --> SQL
     Answer --> UI
     Cache -->|命中| UI
-    Scope --> Eval[检索对比 / 可选 Ragas]
+    Scope --> Eval[检索对比 / Ragas 评测]
     Eval --> SQL
 ```
 
-开发模式不配置 Redis 时，API 启动一个本地摄取线程；配置 Redis 后需单独运行 Worker。生产配置要求 PostgreSQL、Redis 和 Qdrant server；Compose 分开运行 API、Worker 与前端。不能用多个进程同时打开同一个 Qdrant local 路径。
+API 负责账户、知识库、文档与对话接口；Worker 执行解析和索引任务；SQL 保存业务状态和来源文本；Qdrant 保存向量索引；Redis 提供任务唤醒和结果缓存。核心代码分别位于 [API 路由](../backend/app/api/routes.py)、[Worker](../backend/app/worker.py)、[服务层](../backend/app/services/)和 [Vue 页面](../frontend/src/App.vue)。
 
-核心入口是 [API 路由](../backend/app/api/routes.py)、[摄取 Worker](../backend/app/worker.py)、[服务层](../backend/app/services/)和 [Vue 页面](../frontend/src/App.vue)。数据库模型在 [models.py](../backend/app/models.py)，部署编排在 [docker-compose.yml](../docker-compose.yml)。
+开发环境支持 SQLite、Qdrant local 与 API 内的摄取线程。生产配置使用 PostgreSQL、Redis、Qdrant server，并通过 [Compose](../docker-compose.yml)分开运行 API、Worker 和前端。
 
-## 身份、检索范围与不可信内容
+## 身份与知识范围
 
-账户密码使用带随机盐的 PBKDF2-SHA256；服务签发有过期时间的 HMAC Bearer token。生产模式拒绝开发默认密钥。当前权限模型是用户拥有自己的知识库，不包含部门共享或团队角色继承。
+账户密码使用带随机盐的 PBKDF2-SHA256；服务签发带有效期的 HMAC Bearer token。生产配置校验签名密钥，拒绝开发默认值。
 
-每次查询先由 SQL 验证所选知识库归属。空知识库列表表示当前用户的全部知识库；传入不属于当前账户的 ID 返回 404。SQL 只加载当前用户且文档状态为 ready 的片段，Qdrant 再通过 HasIdCondition 把这些片段对应的 point ID 作为排名前过滤条件，BM25 也只对同一个授权语料集合计算。API 返回前再次检查引用 chunk ID。权限逻辑见 [scoped_chunks](../backend/app/api/routes.py)和 [retrieve](../backend/app/services/retrieval.py)。
+查询范围从 SQL 中确定：服务先校验所选知识库归属，再加载当前用户且文档状态为 ready 的片段。空知识库列表表示该账户的全部知识库。Qdrant 使用 HasIdCondition 在排名前限制可参与检索的 point ID；BM25 使用相同的授权片段集合。API 返回前再次核对引用 chunk ID，使向量召回、词项召回和答案引用使用一致的范围。实现见 [scoped_chunks](../backend/app/api/routes.py)与 [retrieve](../backend/app/services/retrieval.py)。
 
-文件名只用于展示，原文件使用 UUID 路径保存；下载和 Worker 都检查解析后的路径处于 uploads 目录。上传在 ASGI 层限制整个 multipart 请求，处理函数再以 1 MiB 分块累计文件大小；文件上限默认 50 MiB。SHA256 在知识库内去重，同一文件在不同账户知识库中可以独立保存。
+系统规则与 sources 分开传递，文档、OCR、视觉转录及历史消息均作为数据处理。会话历史从服务端读取并校验归属，只保留 user、assistant 角色；引用编号检查用于保持回答与来源之间的对应关系。
 
-上传文档、OCR 结果、视觉转录和对话历史都属于不可信数据。生成时系统规则与 sources 分开，文档内的指令只作为待引用内容。历史从已校验归属的服务端会话读取，只接受 user、assistant 角色。提示词约束和引用编号检查有助于防止错误引用，不能证明每句话均由证据蕴含，也不能承诺完全消除提示注入或幻觉。
+## 文档生命周期
 
-## SQL 任务是摄取事实来源
+上传采用两层限额：ASGI 层限制 multipart 请求体，处理函数以 1 MiB 分块累计文件大小，默认接受不超过 50 MiB 的文件。原文件使用 UUID 路径保存，文件名保留为展示信息；下载与解析均校验路径处于 uploads 目录。SHA256 在知识库内去重，避免重复摄取。
 
-上传成功先提交 Document 与 IngestionJob，再向 Redis 放入任务 ID。因此 Redis 通知丢失时，SQL 扫描仍能发现 queued 任务。Worker 对 queued 或租约过期的 processing 任务执行条件 UPDATE，只有成功更新一行的消费者获得随机 lease_token；处理期间心跳续租，终态写入也校验 token，避免旧消费者覆盖新消费者结果。
+[解析服务](../backend/app/services/parsing.py)支持 TXT、Markdown、CSV、JSON、HTML、PDF、DOCX、PNG、JPG/JPEG 和 WebP。文本兼容 UTF-8、GB18030 等编码；HTML 清理脚本与样式；DOCX 提取段落、表格及按配置启用的内嵌图片转录。切块默认使用 800 字符窗口、120 字符重叠，并保存文档 ID、页码和顺序。
+
+PDF 保留实际页序号；含图像且需要转录的页面进入渲染、OCR 或视觉模型路径。OCR 使用 Tesseract 的 chi_sim、eng 语言包，视觉转录通过 Ollama 或 OpenAI 兼容模型完成，生成可检索的正文、表格和图表描述。
+
+## 持久化任务与恢复
+
+上传成功后先提交 Document 与 IngestionJob，再向 Redis 发送任务 ID。SQL 是任务状态的事实来源，Redis 用于唤醒消费者；通知丢失时，周期扫描仍可发现待处理任务。
+
+Worker 通过条件 UPDATE 原子领取 queued 或租约过期的 processing 任务。领取成功后获得随机 lease_token，处理期间由心跳续租，终态写入再次校验 token，防止旧消费者覆盖后续执行结果。
 
 ```mermaid
 stateDiagram-v2
     [*] --> queued: 原文件与任务登记
     queued --> processing: 原子领取租约
-    processing --> processing: 心跳续租
-    processing --> completed: 解析、索引、SQL 提交
+    processing --> processing: 心跳续租或过期后重新领取
+    processing --> completed: 解析、索引与状态提交
     processing --> failed: 记录错误并清理部分数据
-    processing --> queued: 过期任务由扫描重新领取
-    failed --> queued: 用户重试
-    completed --> queued: 用户重新索引
+    failed --> queued: 创建重试任务
+    completed --> queued: 创建重新索引任务
 ```
 
-图中的“过期后重新领取”是逻辑恢复：代码可以直接重新领取过期的 processing 记录，不必先持久化为 queued。租约与 attempts 字段用于恢复和审计；这不是跨 SQL、文件系统与 Qdrant 的分布式事务，也不保证任务只执行一次。失败路径清理部分 SQL/向量数据，删除与索引使用数据库写入协调；进程或外部服务在关键时刻中断仍需结合任务状态检查并重试。
+默认每 2 秒扫描任务，租约为 600 秒，心跳间隔不超过 15 秒，具体参数见 [Settings](../backend/app/config.py)。任务状态、进度和错误通过文档列表及 /api/jobs/{id} 提供。失败路径清理部分 SQL 与向量数据，删除和索引通过数据库写入协调。
 
-默认配置每 2 秒扫描，租约 600 秒，心跳间隔不超过 15 秒。值以 [Settings](../backend/app/config.py) 为准。文档与任务状态、进度和失败原因可通过文档列表及 /api/jobs/{id} 查看。
+## 混合检索与证据编排
 
-## 解析与来源定位
-
-[parsing.py](../backend/app/services/parsing.py)支持 TXT、Markdown、CSV、JSON、HTML、PDF、DOCX、PNG、JPG/JPEG 和 WebP。文本兼容 UTF-8、GB18030 等编码；HTML 移除脚本和样式；DOCX 提取段落与表格。文本以递归分隔器切块，默认 800 字符、重叠 120 字符，并保留文档 ID、片段顺序及页码。
-
-PDF 使用实际页序号。文本页中的空白页或短标题不会仅因字符少而强制 OCR；存在图像且需要转录时，渲染页面再交给 OCR/视觉模型。OCR 依赖 Tesseract 的 chi_sim 与 eng 语言包；视觉路径支持 Ollama 或 OpenAI 兼容接口上的 Qwen-VL 等模型。配置视觉能力时也可提取 DOCX 内嵌图片。渲染和转录是有额外资源开销的功能，所需模型与运行依赖必须实际可用。
-
-DOCX 没有稳定的物理页信息；当前返回 page=1，表示逻辑文本区域，不能解释为 Word 或打印后的第 1 页。CSV、Markdown、独立图片等也使用逻辑页。需要物理页定位时应先转换为 PDF。
-
-## 混合检索和有界 Agent
-
-Dense 检索使用 Qdrant cosine 相似度。稀疏检索使用 jieba 中文分词和 BM25Okapi；对小语料中的非正 IDF 使用正值下限，避免一两篇文档时相关词无法形成正匹配。Dense 与 BM25 分别召回后，以 chunk ID 去重，通过 RRF 合并排序：
+Dense 检索使用 Qdrant cosine 相似度，词项检索使用 jieba 分词和 BM25Okapi。小语料中的非正 IDF 使用正值下限，使少量文档也能形成有效词项匹配。两路结果按 chunk ID 去重并进行 RRF 融合：
 
 ```text
 RRF(chunk) = Σ 1 / (60 + rank_in_each_list)
 ```
 
-RRF 是排名融合分，dense_score 是向量相似度，bm25_score 是词项相关分；可选 rerank_score 是 CrossEncoder 输出。它们不共享量纲，不应把 RRF 的 0.03 当成“3% 置信度”，也不能直接复用余弦阈值判断答案可靠程度。API 分开保存这些分数。
+返回结果分别保留 dense_score、bm25_score、retrieval_score 和可选的 rerank_score。RRF 表达多路排名的综合次序，CrossEncoder 表达查询与候选文本的匹配分；这些分数采用各自的尺度，不能换算为答案正确概率。
 
-Agent 模式是服务端控制的证据补充循环：先召回较宽的候选，计算词项覆盖率，覆盖不足时做确定性的关键词改写；每次改写召回不执行精排，候选合并后最终只做一次 CrossEncoder，再截取 top_k。默认最多改写 2 次，代码硬上限 3 次。覆盖率只是一种启发式，不是正确率、语义充分性评分或 Ragas 分数。此模式没有通用工具执行、任意代码运行或额外的规划 LLM 调用。
+Agent 模式采用有界的证据补充流程：召回较宽候选，计算词项覆盖率，覆盖不足时进行关键词改写，再合并候选。各次补充召回跳过精排，最终统一调用一次 CrossEncoder 并截取 top_k。默认最多改写 2 次，代码硬上限为 3 次；词项覆盖率用于控制检索流程，复杂问题的处理效果通过评测观察。
 
-CrossEncoder 仅在设置 RAG_RERANKER_MODEL 且相应依赖、模型可用时启用。首次模型下载和本机推理成本应单独计算；当前不把“启用配置”当成“完成质量验证”。
+CrossEncoder 由 RAG_RERANKER_MODEL 启用。该模式聚焦知识检索编排，不开放任意代码或通用外部工具执行。
 
-## 历史、缓存与模型预算
+## 对话、缓存与上下文预算
 
-会话由当前账户拥有。生成服务对历史限定为最近 6 条消息，每条最多 1600 字符；短追问或“它、上述、继续”等指代问题会结合上一轮用户问题形成检索上下文。该规则不等同于完整的指代消解。
+检索上下文读取最近 6 条历史消息，每条最多 1600 字符。短追问或带指代的问题会结合上一轮用户问题形成检索输入，让对话延续已有主题。
 
-答案缓存键包括问题、模式、top_k、模型/接口、提示词版本、实际使用的历史，以及当前全部授权片段的 ID、文档名、页码与正文。修改语料或切换授权范围会改变键，旧答案不会被新的请求直接复用。Redis 使用 TTL；无 Redis 或 Redis 读写失败时有进程内缓存，最多 128 项、默认 TTL 3600 秒。命中时返回 cached=true、model_calls=0。缓存不会推断或承诺固定的成本下降比例。
+答案缓存键包含问题、模式、top_k、模型与接口、提示词版本、历史，以及授权语料的片段 ID、文档名、页码与正文。语料更新或范围变化会改变缓存键。Redis 缓存按 TTL 过期；本地缓存最多保留 128 项，默认 TTL 为 3600 秒。命中结果通过 cached 与 usage 字段体现。
 
-生成前还会执行证据预算：以 ollama_num_ctx 减去 max_output_tokens 和 1800 的固定开销预留，用 UTF-8 字节数近似约束输入。发送给模型的历史进一步限制为最近 4 条、每条 600 字节，片段按最终排名依次装入，最后一条可裁剪；引用内容与实际发送的裁剪后正文保持一致。问题与历史已经超过可用预算时返回可操作的错误。该策略偏保守，字节数不是所选模型分词器的精确 token 计数；非 Ollama 接口也应把 ollama_num_ctx 配为实际上下文窗口上限。实现见 [answering.py](../backend/app/services/answering.py)及 [Settings](../backend/app/config.py)。
+生成前，系统从 ollama_num_ctx 中扣除 max_output_tokens 和固定开销预留，以 UTF-8 字节数保守分配输入预算。发送历史进一步收缩为最近 4 条、每条 600 字节；证据按最终排名装入，末条可裁剪，引用正文与实际发送内容保持一致。超过问题及历史预算时返回明确错误。OpenAI 兼容服务也使用这一预算参数，应按所选模型的上下文窗口设置。
 
-模型未配置时返回明确标注的原文摘录；hash embedding 只供离线链路演示，不代表语义检索。模型回答必须使用有效 [n] 引用编号，编号越界会清除；没有有效引用时退回摘录。使用真实模型也应通过评测检查证据充分性。
+未配置生成模型时提供原文摘录模式；配置后通过 [LangChain 适配器](../backend/app/services/answering.py)调用模型。回答使用 [n] 来源编号，越界编号被清除；没有有效引用的输出退回原文摘录。
 
-## 本机 Ollama 配置
+## 模型与存储配置
 
-用户指定的 Python 环境为 cook-rag-1。本机复用配置由 [configure-local.py](../scripts/configure-local.py)读取相邻 code_c8 项目的环境变量，生成当前项目不入库的 .env；文档不记录任何实际连接凭据。
+系统支持 Ollama、SentenceTransformers 和 OpenAI 兼容向量服务。Qdrant 集合名称包含向量配置指纹，向量维度变化后需要重新索引。数据访问配置通过环境变量提供，模型参数与业务代码分离。
 
-| 项目 | 本机配置 |
+| 配置项 | Ollama 部署示例 |
 | --- | --- |
-| 对话与视觉转录模型 | Ollama qwen3.5:9b |
-| 语义向量模型 | Ollama qwen3-embedding:8b |
-| 向量维度 | 4096；与向量请求上下文长度是不同概念 |
-| 向量请求上下文 | 默认 4096，按批次请求并检查返回维度 |
-| 对话上下文 / 最大输出 | 默认 16384 / 2048 |
-| 数据隔离 | 独立 PostgreSQL 数据库 rag_knowledge_assistant、Redis DB 6、Qdrant rag_assistant_* 集合 |
+| 对话与视觉模型 | qwen3.5:9b |
+| 向量模型 | qwen3-embedding:8b |
+| 向量维度 | 4096 |
+| 向量请求上下文 | 4096 |
+| 对话上下文 / 最大输出 | 16384 / 2048 |
+| 服务隔离 | 独立 SQL 数据库、Redis 数据库与 Qdrant 集合前缀 |
 
-该配置说明模型适配路径，不代表已经测得特定延迟、显存占用、Ragas 质量或相对提升。通过脚本生成的凭据配置与运行数据不能提交到 Git。
+模型与依赖安装方式见[部署指南](deployment.md)。仓库中的[模型适配验证记录](artifacts/model-adapters-2026-10-16.json)记录了 CrossEncoder 实际推理与视觉转录检查。
 
-## 评测与当前限制
+## 评测闭环
 
-[evaluation.py](../backend/app/services/evaluation.py)提供基于人工 expected_document_ids 标注的 Hit@5、Recall@5 和 MRR@5，以及 dense 与 hybrid 的相同语料对比。命中以文档为相关性单位，排序槽位仍来自片段；多个片段来自同一文档会占用多个 top-5 槽位。reference_token_recall 只是词项重叠，不冒充 answer_relevancy 或 faithfulness。
+[评测服务](../backend/app/services/evaluation.py)根据 expected_document_ids 计算 Hit@5、Recall@5 和 MRR@5，并支持在同一标注集上对比 dense 与 hybrid。相关性以文档为单位，top-5 槽位按检索片段排序计算。reference_token_recall 提供参考答案词项覆盖信息。
 
-显式开启 Ragas 且具备真实模型、语义向量、reference 和 evaluation 依赖时，才计算 faithfulness、answer_relevancy、context_precision、context_recall。前置条件在检索与生成前校验，失败保留失败状态和错误，不能以零分或虚构分数代替未执行。
+启用 Ragas 后，系统使用真实生成模型、语义向量及 reference 计算 faithfulness、answer_relevancy、context_precision、context_recall。依赖和配置在调用前校验，评测结果、失败状态与错误均持久化保存。
 
-评测案例可以指定当前账户历史助手消息的 message_id，复用当时的问题、答案与引用，避免再次生成答案；服务端校验历史消息归属。这是对原答案的回放评测，不能冒充更新语料后的重新检索效果。Ragas 判断另有缓存，键包含问题、答案、上下文、reference、评审及向量模型/接口、评测协议版本；只缓存四项均有效的分数，并报告 judge_cached_cases 与 judge_scored_cases。实际执行使用单并发、受配置超时和重试上限约束，保护本机模型资源。
+历史评测通过 message_id 读取当前账户的已保存答案与引用，支持对同一回答反复评估；实时检索评测用于观察当前语料与配置。Ragas 判断缓存包含问题、答案、上下文、reference、模型与协议版本，只保存四项均有效的分数，并记录 judge_cached_cases、judge_scored_cases。评测执行采用单并发及有界超时、重试，控制模型资源占用。
 
-没有真实模型条件的离线自动化测试只验证行为，不验证模型判断质量。测试入口为 [test_api.py](../backend/tests/test_api.py)与 [test_services.py](../backend/tests/test_services.py)，可在项目根目录运行 scripts/dev.ps1 -Service test。
+## 设计取舍与扩展方向
 
-当前边界：
+| 当前实现 | 扩展方向 |
+| --- | --- |
+| DOCX、文本和独立图片使用逻辑页；DOCX page=1 | 需要物理页定位时转换为 PDF，或引入布局解析器 |
+| SSE 在完整答案生成入库后回放 sources、trace、token、done | 接入供应商原生流式协议，缩短首段内容等待时间 |
+| SQLAlchemy create_all 初始化数据表 | 为持续版本升级引入 Alembic 迁移与回滚流程 |
+| 账户拥有知识库，检索按账户隔离 | 增加组织、团队 RBAC、共享 ACL 与 SSO |
+| BM25 在请求内重建，SQL 加载授权片段，Qdrant 按片段 ID 过滤 | 面向更大语料建立持久化稀疏索引与服务端范围过滤 |
+| SQL 租约恢复与失败清理协调多个存储 | 增加跨存储对账、故障演练与更多运行指标 |
+| 同步评测接口及持久化运行结果 | 为大批量评测引入独立作业调度 |
+| 字节预算、词项覆盖率和引用编号校验 | 增加模型分词器预算与语义证据校验 |
 
-- /api/chat/stream 在完整答案生成并入库后回放 SSE sources、trace、token、done；它不提供供应商逐 token 的实时推理流。
-- 数据表使用 SQLAlchemy create_all 初始化，没有 Alembic 迁移历史；升级现有结构前需要迁移方案和备份。
-- 用户隔离不等于团队 RBAC、文档共享 ACL、SSO 或完整企业审计。
-- BM25 每次请求对授权片段在内存中重建，SQL 加载整个候选正文；Qdrant 过滤传入全部授权 chunk ID。该实现适合本机与中小语料验证，未进行百万片段规模压测。
-- 评测接口同步运行；重启后处理过期 running 记录不能替代完整的评测作业调度。
-- 自动化测试、真实模型联调、Docker 整栈测试、质量基准应分别记录，不因代码存在而视为全部通过。项目没有把截图中的“命中提升 20%”或“成本降低 30%”写成实测结论。
+自动化测试见 [test_api.py](../backend/tests/test_api.py)与 [test_services.py](../backend/tests/test_services.py)。检索质量、模型判断、缓存收益和运行容量分别使用对应数据集与环境评估，便于比较不同模型、语料和部署配置。

@@ -1,61 +1,82 @@
-# 验证记录
+# 评测与验证
 
-验证于2026年10月15日至16日在用户电脑完成。Python解释器来自conda `cook-rag-1`；前后端源码位于 `E:\Leon\rag_search`。
+本文记录自动化检查、模型链路和容器验证结果，便于复现、排查问题及比较后续版本。记录日期：2026年10月15日至16日。
 
-## 自动测试
+## 自动化检查
 
-后端20项测试通过，ruff静态检查通过；Vue TypeScript类型检查及Vite生产构建通过。推送后的 [GitHub CI](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/runs/38843298699) 也已在干净Linux环境通过后端测试与前端构建。
+| 检查项 | 结果 | 覆盖内容 |
+| --- | --- | --- |
+| 后端测试 | 20项通过 | 账户权限、上传、任务恢复、检索、引用与历史复评 |
+| 静态检查 | 通过 | Ruff |
+| 前端检查 | 通过 | TypeScript类型检查与Vite构建 |
+| 持续集成 | 通过 | Linux环境的后端测试与前端构建 |
 
-测试覆盖账户权限与过期token、50MiB上传边界、文件路径、重复上传、任务失败重试与过期租约恢复、文档删除向量清理、Qdrant查询前权限过滤、单文档BM25、PDF空白页、DOCX表格、一次CrossEncoder重排、上下文预算、历史复评所有权和答案缓存失效。
+持续集成记录：[GitHub Actions](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/runs/38844819562)。
 
-```powershell
+测试覆盖50MiB上传边界、SHA256去重、路径校验、过期token、租约恢复、向量清理、权限范围过滤、单文档BM25、PDF空白页、DOCX表格、统一精排、上下文预算及缓存失效。
+
+```bash
 python -m ruff check backend scripts
-python -m pytest backend/tests -q --basetemp=./.test-tmp/validation
-cd frontend
+cd backend
+python -m pytest -q
+cd ../frontend
 npm run build
 ```
 
-## 真实模型与完整服务
+## 端到端模型链路
 
-完整记录：[smoke-2026-10-15.json](artifacts/smoke-2026-10-15.json)。语料仅为仓库内两份虚构演示文档，检索对照与Ragas仅使用一条标注案例。
+验证组合为 **PostgreSQL + Redis + Qdrant + Ollama**，生成模型使用 `qwen3.5:9b`，Embedding使用 `qwen3-embedding:8b`。
 
-| 项目 | 结果 |
+| 验证项 | 结果 |
 | --- | --- |
-| PostgreSQL / Redis / Qdrant / Ollama | 真实连接通过 |
-| 生成模型 | `qwen3.5:9b` |
-| 嵌入模型 | `qwen3-embedding:8b` |
-| Qdrant向量 | 实际4096维、非零，片段ID与SQL一致 |
-| 文档入库 | 两份文档完成异步解析与索引 |
-| 标准/Agent回答 | 正确引用住宿500元；返回原文证据 |
-| 多轮追问 | 同一会话能回答报销30天提交期限 |
-| 答案缓存 | 复用相同答案，不新增生成调用 |
-| 历史复评 | 复用已保存的答案与证据，结果一致 |
-| Ragas评分缓存 | 命中1条，新增评审案例0条，四指标一致 |
-| Dense / Hybrid Hit@5 | 均为1.0，相对变化0% |
+| 异步文档摄取 | 两份示例文档完成解析与索引 |
+| 向量写入 | 4096维非零向量，片段ID与SQL记录一致 |
+| 标准问答 | 返回答案、来源编号与原文片段 |
+| Agent问答 | 检索、证据检查与生成链路完成 |
+| 多轮上下文 | 同一会话内完成连续追问 |
+| 答案缓存 | 重复请求复用答案 |
+| 历史复评 | 使用已保存的问题、答案与引用 |
+| 评分缓存 | 命中已保存的评分，四项结果保持一致 |
 
-Ragas 0.3.9、本机Qwen裁判的单案例真实评分：
+完整结果：[模型链路记录](artifacts/smoke-2026-10-15.json)、[核心流程记录](artifacts/smoke-2026-10-15-core.json)。
 
-| 指标 | 得分 |
+## 检索与Ragas样例
+
+以下结果来自仓库内两份示例文档、一条标注案例，Ragas版本为0.3.9。该用例用于检查评测流程，效果比较应结合具体业务评测集进行。
+
+| 检索指标 | Dense | Hybrid |
+| --- | ---: | ---: |
+| Hit@5 | 1.0000 | 1.0000 |
+| Recall@5 | 1.0000 | 1.0000 |
+| MRR@5 | 1.0000 | 1.0000 |
+
+| Ragas指标 | 得分 |
 | --- | ---: |
-| faithfulness | 0.5000 |
-| answer_relevancy | 0.8742 |
-| context_precision | 约1.0000 |
-| context_recall | 1.0000 |
+| Faithfulness | 0.5000 |
+| Answer relevancy | 0.8742 |
+| Context precision | 约1.0000 |
+| Context recall | 1.0000 |
 
-忠实度0.5原样保留；它说明本地模型裁判并未给出满分，不能解释为本系统整体准确率。四指标是自动裁判的小样本结果，仍需更多人工标注、错误分析和多次重复实验。没有证据支持普遍20%命中提升或30%成本下降。
+复用同一历史答案与评审配置时，评分缓存命中1条，新增评审案例为0条。
 
-首次Ragas测试发现本机Qwen将schema当作输出；修复为独立JSON实例提示、Ollama JSON模式与顺序评审后，四指标与缓存回放均真实完成。没有以默认值替代失败评分。
+## 多模态与重排适配
 
-## 浏览器
+| 适配器 | 验证方式 | 结果 |
+| --- | --- | --- |
+| 多语言CrossEncoder | 对相关/无关语句分别打分 | 0.9565 / -4.6102 |
+| Qwen视觉解析 | 通过正式解析入口处理英文测试图片 | 保留500与30两个关键数值 |
 
-真实浏览器验证了注册、创建知识库、演示文档批量上传与状态显示。工作台可显示知识库、文档、引用证据、检索轨迹与评测信息。页面不预填虚构运行指标，空账户显示真实空状态。
+测试图片为黑白英文样例，视觉检查未启用OCR。文档摄取与问答用例、独立重排适配器用例分别记录。完整输出见 [模型适配记录](artifacts/model-adapters-2026-10-16.json)。
 
-## 部署与范围
+## 容器与界面
 
-本机完整应用使用PostgreSQL/Redis/Qdrant容器和宿主机Python/Vue/Ollama。完整Compose定义另提供干净部署路径。模型权重、实际API key、原文上传、账号token与本机 `.env` 均未提交到Git。
+Docker Compose配置检查及前后端镜像构建通过。后端默认包含`ml,evaluation`依赖，在离线、非root容器中通过以下检查：
 
-Docker Compose配置检查、前端与后端Docker镜像实际构建均已通过。后端默认包含ml/evaluation：离线、非root容器内pip check无依赖冲突，Ragas0.3.9与CPU PyTorch可正常导入，TestClient `/api/health` 返回200，Tesseract中英文语言包存在。详见 [容器验证记录](artifacts/docker-2026-10-16.json)。这验证了镜像构建和独立启动，不等同于重新部署完整生产Compose栈。
+- `pip check`无依赖冲突。
+- Ragas、SentenceTransformers与CPU PyTorch导入成功。
+- `/api/health`返回200。
+- Tesseract包含中文与英文语言包。
 
-独立模型适配器验证见 [model-adapters-2026-10-16.json](artifacts/model-adapters-2026-10-16.json)：多语言CrossEncoder真实预测两条语句，相关句分数0.9565、不相关句-4.6102；qwen3.5:9b通过正式解析入口提取测试图片，正确保留500和30。视觉样例为简单英文黑白图片，OCR关闭，不代表中文扫描PDF质量基准。主问答冒烟沿用cook配置，未启用重排，独立适配器检查与检索质量对照分别记录。
+容器记录见 [Docker验证](artifacts/docker-2026-10-16.json)。验证范围包括镜像构建与独立容器健康检查；完整Compose编排见部署文档。
 
-这不是企业负载、容灾、渗透或大规模OCR评测，不将配置开关等同于能力质量达标。初始schema使用create_all；大型稀疏索引、团队RBAC、增量数据库迁移仍是后续范围。
+浏览器检查覆盖注册、知识库创建、批量上传与文档状态显示。后续版本可继续扩展检索评测集、中文扫描文档集和负载测试。

@@ -1,151 +1,235 @@
-# 知衡 · RAG Knowledge Assistant
+<div align="center">
 
-**把企业文档变成带出处、可评测的答案。**
+# 知衡 · Knowledge OS
 
-Python / LangChain / FastAPI / PostgreSQL / Redis / Qdrant / Ragas / Vue 3 / Docker。
+### 面向私有文档的智能知识检索与问答平台
 
-这是在截图功能要求基础上，参考 [KnowAgenticRAG](https://github.com/Zhongye1/KnowAgenticRAG) 的检索与 Agent 设计独立实现的项目。包含完整前后端、异步摄取、账户隔离、来源引用、历史问答复评与可复现的检索对照。参考范围、需求映射和实现边界见 [需求与来源](docs/requirements-and-provenance.md)。
+连接分散的知识，让每一个答案有据可循。
 
-## 已实现
+[![CI](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-- **知识空间**：多知识库，50MiB 文件上传，逐块限流与 SHA256 去重，异步任务进度、失败重试、重新索引、原文下载与片段预览。
-- **多格式解析**：PDF、DOCX（含表格）、TXT、Markdown、CSV、JSON、HTML、PNG/JPEG/WebP；扫描 PDF 与图片可走 Tesseract OCR 或 Qwen 视觉模型，保留 PDF 页码。
-- **混合检索**：Qdrant dense + 中文分词 BM25 → RRF 融合 → 可选多语言 Cross-Encoder。向量查询之前限定授权片段，避免跨账户召回。
-- **引用问答**：每条证据关联文档、页码、片段和编号；支持本地 Ollama、vLLM / OpenAI 兼容接口，以及明确标注的离线摘录模式。
-- **有界 Agent**：词项覆盖检查、最多两次关键词改写、候选融合后仅一次精排、检索轨迹、服务端会话上下文和输入预算。
-- **质量评测**：文档级 Hit@5 / Recall@5 / MRR@5，Dense / Hybrid 对照；可选真实 Ragas 四指标。历史答案可直接加入复评，复用存档答案和证据；答案缓存与评分缓存分别避免重复调用。
-- **工程闭环**：SQL 持久化任务与租约恢复、Redis 队列和缓存、PostgreSQL 用户/文档/会话/评测持久化、Docker Compose、自动测试、响应式 Vue 工作台。
+[项目简介](#项目简介) · [核心能力](#核心能力) · [系统架构](#系统架构) · [快速开始](#快速开始) · [模型接入](#模型接入) · [文档](#文档)
 
-项目不会预设“命中率提升20% / 成本下降30%”。这些必须由自己的语料、标注集、模型与运行记录验证。hash 向量模式只用于验证软件流程，不能代表语义检索性能。
+</div>
 
-## 在这台电脑启动
+---
 
-用户指定环境为 **conda `cook-rag-1`**，模型配置与 `E:\Leon\code_c8` 相同：
+## 项目简介
 
-| 服务 | 本地配置 |
+**知衡（Knowledge OS）** 是一套面向企业知识管理与个人知识沉淀的 RAG 应用，将文档管理、多模态解析、混合检索、引用问答与质量评测整合到统一工作台。
+
+从产品手册、业务制度到研究资料，知衡将原始文档转化为可检索的知识单元，结合大语言模型生成带有原文依据的回答。用户可以沿着引用回到文档与页码，通过检索轨迹了解证据如何被找到，并将历史答案纳入持续评测。
+
+> **知识管理 → 证据检索 → 引用问答 → 质量评测**，形成可追溯、可迭代的知识应用闭环。
+
+### 适用场景
+
+| 场景 | 使用方式 |
 | --- | --- |
-| 生成 / 视觉模型 | Ollama `qwen3.5:9b` |
-| Embedding | Ollama `qwen3-embedding:8b`，4096维 |
-| 模型端点 | `http://127.0.0.1:11434` |
-| Qdrant | `http://127.0.0.1:6335`，独立 `rag_assistant_*` 集合 |
-| PostgreSQL | 复用 cook 服务，独立数据库 `rag_knowledge_assistant` |
-| PostgreSQL 本机端口 | `15432`；Windows 保留了包含5432的端口范围，使用仅本机 TCP 代理 |
-| Redis | 复用6379服务，独立 DB6 |
-| 后端 / 前端 | `http://127.0.0.1:8010` / `http://localhost:5173` |
+| 企业制度与业务知识 | 汇集制度、流程与操作规范，按问题定位条款及来源 |
+| 产品与技术支持 | 将产品说明、使用手册和技术文档组织为可查询的知识库 |
+| 研究与资料整理 | 跨文档检索关键信息，保留文献片段和页码依据 |
+| RAG 应用开发 | 对比检索策略、检查 Agent 轨迹、复评历史答案与模型效果 |
 
-本地 `.env` 已单独配置并被 Git 忽略。服务若已启动，直接打开前端即可；新用户在页面自行注册。
+## 核心能力
 
-```powershell
-cd E:\Leon\rag_search
-conda activate cook-rag-1
+### 📚 统一知识空间
 
-# 三个终端分别运行（已运行时不需要重复启动）
-.\scripts\dev.ps1 backend
-.\scripts\dev.ps1 worker
-.\scripts\dev.ps1 frontend
+按主题组织多个知识库，在同一界面完成文档上传、任务跟踪、内容预览与原文管理。支持单文件 **50 MiB** 上传、SHA256 去重、失败重试与重新索引。
+
+摄取任务异步完成文档解析、文本分块、Embedding 与向量索引，任务状态持久化，支持租约恢复与中断重试。
+
+### 🔎 多路召回与融合排序
+
+结合 **Qdrant Dense Retrieval** 与中文分词 **BM25**，兼顾语义表达和关键词命中，通过 **RRF** 融合候选排名，并支持使用 **Cross-Encoder** 进一步精排。
+
+检索范围在查询前根据账户和所选知识库确定，问答与向量召回遵循一致的数据访问范围。
+
+### 💬 带有依据的知识问答
+
+回答关联文档名称、页码和原文片段，支持来源编号与证据查看。多轮对话结合服务端会话历史检索，保留问题、答案和引用记录，便于回查与复评。
+
+### 🤖 Agent 检索模式
+
+围绕“检索—证据检查—查询改写—生成”组织问答流程。在证据覆盖不足时进行有界关键词改写，对多轮候选合并去重，再统一精排。检索步骤与处理轨迹可在工作台查看。
+
+### 🖼️ 多模态文档理解
+
+支持 **PDF、DOCX、TXT、Markdown、CSV、JSON、HTML 与图片**。PDF 保留页码，Word 文档提取正文与表格；扫描页和图像可接入 **Tesseract OCR** 或 **Qwen 视觉模型**，将图文信息纳入统一检索。
+
+### 📊 评测与回放
+
+内置 **Hit@5、Recall@5、MRR@5** 检索评测与 Dense / Hybrid 对照，支持通过 **Ragas** 评估忠实度、答案相关性、上下文精确率和召回率。
+
+历史答案可直接加入评测，复用当时的答案和证据。答案缓存与评审缓存分别管理，减少相同内容的重复生成和评分。
+
+### 🏠 灵活的私有化部署
+
+支持 **Ollama、vLLM / OpenAI 兼容接口与 SentenceTransformers**，可根据硬件和数据需求选择模型。提供 Docker Compose 与本地开发两种运行方式，覆盖前端、API、Worker 及存储服务。
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    User[用户] --> Web[Vue 工作台]
+    Web --> API[FastAPI]
+    API --> Auth[账户与知识库范围]
+    Auth --> Upload[文档上传]
+    Upload --> Jobs[持久化任务 / Redis]
+    Jobs --> Worker[异步 Worker]
+    Worker --> Parse[解析 / OCR / 视觉理解]
+    Parse --> Split[按页分块 / Embedding]
+    Split --> Qdrant[(Qdrant)]
+    Split --> PG[(PostgreSQL)]
+    Auth --> Query[问题与会话上下文]
+    Query --> Hybrid[Dense + BM25]
+    Qdrant --> Hybrid
+    PG --> Hybrid
+    Hybrid --> Rank[RRF / Cross-Encoder]
+    Rank --> Answer[LLM / 引用与证据]
+    Answer --> Web
+    Answer --> Eval[历史回放 / Ragas]
+    Eval --> PG
 ```
 
-API 文档：[http://127.0.0.1:8010/docs](http://127.0.0.1:8010/docs)。检查本地基础设施：
+| 层次 | 技术与职责 |
+| --- | --- |
+| 交互层 | Vue 3 · TypeScript · Vite，知识管理、问答与评测工作台 |
+| 应用层 | FastAPI · SQLAlchemy · LangChain，接口、会话与模型适配 |
+| 检索层 | Qdrant · BM25 · RRF · Cross-Encoder，向量召回与融合排序 |
+| 任务与缓存 | Redis · SQL 持久化任务，异步摄取、租约恢复与结果复用 |
+| 业务存储 | PostgreSQL，账户、知识库、文档、会话及评测记录 |
+| 文档理解 | PyPDF · python-docx · Tesseract · 视觉模型 |
+| 评测与交付 | Ragas · Pytest · Ruff · GitHub Actions · Docker Compose |
 
-```powershell
-python -X utf8 scripts/check-infrastructure.py
-```
+本地开发也可使用 SQLite 与 Qdrant local。完整数据流与实现细节见 [架构文档](docs/architecture.md)。
 
-如需在新的本地 checkout 重新导入 cook 配置，在没有 `.env` 时运行：
+## 快速开始
 
-```powershell
-python -X utf8 scripts/configure-local.py --source E:\Leon\code_c8\.env --create-database --expose-postgres --postgres-port 15432
-```
+### 方式一：Docker Compose
 
-该脚本只为新项目建独立数据库，复用连接凭据，不修改 cook 的文档、索引或数据库记录。其他电脑无需使用此导入脚本。
+准备 Docker 与 Compose，克隆仓库并创建部署配置：
 
-## 通用安装
-
-Python 3.12、Node.js 20.19+；完整服务需要 PostgreSQL、Redis、Qdrant 和 Ollama。首次安装：
-
-```powershell
+```bash
 git clone https://github.com/leonbuilds-ai/rag-knowledge-assistant.git
 cd rag-knowledge-assistant
-conda activate cook-rag-1
+cp .env.production.example .env.docker
+```
 
-cd backend
-python -m pip install -e ".[dev,ml,evaluation]"
-cd ../frontend
+编辑 `.env.docker`，配置存储服务密码、应用密钥与模型连接，然后启动：
+
+```bash
+docker compose --env-file .env.docker up --build -d
+```
+
+| 入口 | 地址 |
+| --- | --- |
+| 知识工作台 | [http://localhost:8080](http://localhost:8080) |
+| API 文档 | [http://localhost:8010/docs](http://localhost:8010/docs) |
+
+使用宿主机 Ollama、配置 OCR 或调整服务参数，可查阅 [部署指南](docs/deployment.md)。
+
+### 方式二：本地开发
+
+环境要求：**Python 3.12、Node.js 20.19+**，以及可用的模型服务。
+
+```bash
+git clone https://github.com/leonbuilds-ai/rag-knowledge-assistant.git
+cd rag-knowledge-assistant
+
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e "./backend[dev,ml,evaluation]"
+
+cd frontend
 npm ci
 cd ..
-Copy-Item .env.ollama.example .env
+cp .env.ollama.example .env
 ```
 
-准备本地模型并启动 Ollama：
+Windows 可使用 `.venv\Scripts\Activate.ps1` 激活环境，也可使用已有 conda 环境。配置文件提供 Ollama 模型示例；准备模型后，在两个终端分别启动：
 
-```powershell
-ollama pull qwen3.5:9b
-ollama pull qwen3-embedding:8b
-ollama serve
-```
-
-`.env.ollama.example` 默认用 SQLite / Qdrant local，可先验证模型闭环；需要队列和 PostgreSQL 时填写对应连接。**独立 Redis worker 必须搭配 Qdrant server**，Qdrant local 的同目录文件锁只支持单进程。
-
-完全离线的软件演示可改用 `.env.example`：无模型下载、无 API Key，但回答会显示“本地摘录模式”。具体模型切换、OCR 与容器部署见 [部署指南](docs/deployment.md)。
-
-## 试用流程
-
-1. 注册账号，创建“企业制度”知识库。
-2. 上传 [演示员工手册](examples/company-handbook.md) 和 [产品说明](examples/product-guide.md)，等待状态变为“已就绪”。
-3. 进入智能问答，选择知识库，提问“出差住宿报销上限是多少？”。检查答案编号、原文证据与检索轨迹。
-4. 点击答案旁“加入评测”，填写参考答案和期望文档，运行离线复评；需要模型裁判时开启 Ragas。
-5. 用相同标注集运行 Dense / Hybrid 对照。没有期望文档标注的案例不会产生伪造的命中率。
-
-示例评测集：[evaluation-cases.json](examples/evaluation-cases.json)。导入后将 `expected_document_ids` 替换为当前账户上传后的真实文档 ID。
-
-## 测试与验证
-
-```powershell
-python -m ruff check backend scripts
+```bash
+# 终端一：API
 cd backend
-python -m pytest -q
-cd ../frontend
-npm run build
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
 
-Windows 受限环境的默认临时目录可能不可写，可运行 `scripts/dev.ps1 test`，将测试文件写到项目 `backend/data`。API 集成测试使用真实 SQLite 和本地 Qdrant，不调用收费模型。
-
-完整本地服务的真实模型验证脚本：
-
-```powershell
-python -X utf8 scripts/smoke.py
-# 会额外调用本地模型裁判，耗时取决于硬件
-python -X utf8 scripts/smoke.py --with-ragas
+```bash
+# 终端二：前端
+cd frontend
+npm run dev
 ```
 
-验证范围与结果见 [验证记录](docs/validation.md)。不要把小型演示集的结果外推为企业场景准确率。
+访问 [http://localhost:5173](http://localhost:5173)。启用 Redis 队列时，另在 `backend` 目录运行 `python -m app.worker`，并配置 Qdrant server。
 
-## 结构与文档
+## 模型接入
+
+| 接入方式 | 典型配置 | 用途 |
+| --- | --- | --- |
+| Ollama | `RAG_LLM_PROVIDER=ollama` | 本地生成与视觉理解 |
+| vLLM / OpenAI 兼容 API | `RAG_LLM_PROVIDER=openai` | 自托管或远程模型服务 |
+| Ollama Embedding | `RAG_EMBEDDING_PROVIDER=ollama` | 本地语义向量 |
+| 兼容 Embedding API | `RAG_EMBEDDING_PROVIDER=openai` | 独立向量模型服务 |
+| SentenceTransformers | `RAG_EMBEDDING_PROVIDER=sentence-transformers` | 本地语义编码 |
+| Cross-Encoder | `RAG_RERANKER_MODEL` | 检索候选精排 |
+
+Ollama 示例模型为 `qwen3.5:9b` 与 `qwen3-embedding:8b`。视觉模型通过 `RAG_VISION_MODEL` 配置，模型名称、地址、上下文窗口和向量维度均可调整。
+
+项目同时提供轻量演示配置 `.env.example`，使用哈希向量与原文摘录，方便在未接入模型时体验文档管理和检索流程。
+
+## 开始使用
+
+1. **建立知识空间**：注册账户，按业务或主题创建知识库。
+2. **导入文档**：上传手册、制度或研究资料，等待解析与索引完成。
+3. **提问并查看证据**：选择知识库与问答模式，结合原文引用核对答案。
+4. **持续评测**：将答案加入评测集，填写参考答案与期望文档，对比检索策略与模型结果。
+
+仓库提供 [演示文档](examples/company-handbook.md)、[产品说明](examples/product-guide.md) 和 [评测案例](examples/evaluation-cases.json)，可用于体验完整流程。
+
+## 测试与开发
+
+| 检查 | 命令 |
+| --- | --- |
+| 静态检查 | `python -m ruff check backend scripts` |
+| 后端测试 | `cd backend` 后运行 `python -m pytest -q` |
+| 前端构建 | `cd frontend` 后运行 `npm run build` |
+| 模型链路验证 | `python scripts/smoke.py` |
+| Ragas 评测验证 | `python scripts/smoke.py --with-ragas` |
+
+GitHub Actions 覆盖后端测试与前端构建；模型与容器验证记录见 [评测与验证](docs/validation.md)。
+
+## 项目结构
 
 ```text
-backend/app/
-  api/routes.py       # 账户、知识库、文档、问答、评测 API
-  models.py           # PostgreSQL / SQLite 数据模型
-  worker.py           # 持久化任务、租约与恢复
-  services/
-    parsing.py        # 解析 / OCR / 视觉 / 页码切块
-    embeddings.py     # Ollama / OpenAI / SentenceTransformers / hash
-    retrieval.py      # Qdrant / BM25 / RRF / Cross-Encoder
-    answering.py      # 有界 Agent、引用、上下文与缓存
-    evaluation.py     # 检索对照、历史复评、Ragas
-frontend/             # Vue 3 + TypeScript 工作台
-scripts/              # 启动、本机配置、依赖检查、真实模型冒烟
-examples/             # 虚构演示文档与评测案例
-docs/                 # 架构、部署、来源和验证记录
+rag-knowledge-assistant/
+├── backend/
+│   ├── app/
+│   │   ├── api/             # 账户、知识库、文档、问答与评测接口
+│   │   ├── services/        # 文档理解、检索、生成与评测
+│   │   ├── models.py        # 业务数据模型
+│   │   └── worker.py        # 异步摄取与任务恢复
+│   └── tests/               # 接口与检索链路测试
+├── frontend/                # Vue 3 知识工作台
+├── docs/                    # 架构、部署与评测文档
+├── examples/                # 示例文档与评测案例
+├── scripts/                 # 开发与验证工具
+└── docker-compose.yml       # 应用与基础服务编排
 ```
 
-- [架构与数据流](docs/architecture.md)
-- [截图需求映射与蓝本来源](docs/requirements-and-provenance.md)
-- [部署与模型配置](docs/deployment.md)
-- [验证记录与已知限制](docs/validation.md)
+## 文档
 
-当前账户之间完全隔离，尚未提供团队共享与细粒度角色管理；初始表由 `create_all` 创建，后续结构升级需补充数据库迁移。BM25 当前在授权语料内存构建，面向大规模语料应迁移独立稀疏索引。`/chat/stream` 是完整答案落库后的 SSE 分块回放。以上边界在文档中明确说明。
+| 文档 | 内容 |
+| --- | --- |
+| [系统架构](docs/architecture.md) | 数据流、检索策略、任务恢复与缓存设计 |
+| [部署指南](docs/deployment.md) | Docker、本地开发、模型接入与运维 |
+| [设计原则](docs/design.md) | 设计目标、技术取舍与相关开源项目 |
+| [评测与验证](docs/validation.md) | 自动化检查、模型链路与评测记录 |
 
-## 许可证与参考
+## License & Acknowledgements
 
-本项目独立实现，采用 [MIT](LICENSE)。参考上游的架构与检索思想，未复制其源码：上游在审阅提交中只有 README 的 MIT 标注，未找到许可证正文。完整依据见 [来源说明](docs/requirements-and-provenance.md)。模型权重与依赖库遵循各自许可证。
+本项目采用 [MIT License](LICENSE)。感谢 [KnowAgenticRAG](https://github.com/Zhongye1/KnowAgenticRAG) 提供的 Agentic RAG 架构设计启发，以及 LangChain、Qdrant、Ragas 和 Vue 等开源项目。
