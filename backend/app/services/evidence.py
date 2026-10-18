@@ -6,7 +6,7 @@ from app.services.embeddings import tokenize
 
 STOPWORDS = {"的", "是", "了", "什么", "如何", "怎么", "有哪些", "请", "和", "与", "有", "几天", "多少",
              "是多少", "请问", "吗", "呢", "能否", "可以", "需要", "解释", "一下", "介绍", "关于", "一个", "为什么",
-             "中", "由", "哪些", "包含", "包括", "组成", "主要", "两个", "语言"}
+             "中", "上", "为", "方面", "由", "哪些", "包含", "包括", "组成", "主要", "两个", "语言"}
 
 
 def clean_pdf_text(text):
@@ -21,6 +21,9 @@ def clean_pdf_text(text):
 
 
 def focus(question):
+    quantity = quantity_subject(question)
+    if quantity:
+        return quantity
     subject = definition_subject(question)
     match = re.match(r"^(.+?)(?:由哪些|包含哪些|包括哪些|的底层结构|的核心理念|的实现原理|的特点|的作用|的核心思想|的(?:两个|几个|哪些)?阶段)", question)
     subject = match[1] if match else subject or question
@@ -28,6 +31,14 @@ def focus(question):
     if re.search(r"(?:Go|Python|Java|C\+\+)语言?中?\s*[A-Za-z_]+", subject, re.I):
         subject = re.sub(r"^(?:Go|Python|Java|C\+\+)(?:语言)?中?", "", subject, flags=re.I)
     return subject
+
+
+def quantity_subject(question):
+    """Identify a single value lookup without narrowing multi-part comparisons."""
+    if re.search(r"分别|以及|和|与|及|比较|对比|同时", question):
+        return ""
+    match = re.match(r"^(?:请问|请)?(.+?)(?:应为|应达到|为|是)?(?:多少|多久|多长|几天|几年|几个月)[？?。]*$", question.strip())
+    return match[1].strip() if match else ""
 
 
 def clean_text(text):

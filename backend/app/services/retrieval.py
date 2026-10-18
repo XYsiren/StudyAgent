@@ -90,11 +90,15 @@ def reranker(name: str):
 
 
 def rerank_candidates(question: str, candidates: list[dict], top_k: int, use_model: bool = True) -> list[dict]:
-    from app.services.evidence import clean_pdf_text, clean_text, coverage, evidence_score, focus
+    from app.services.evidence import clean_pdf_text, clean_text, coverage, evidence_score, focus, quantity_subject
     candidates = [{**item, "text": clean_text(item["text"])} for item in candidates]
     candidates = [{**item, "text": clean_pdf_text(item["text"])} if item.get("document_name", "").lower().endswith(".pdf")
                   else item for item in candidates]
     candidates = [item for item in candidates if item["text"]]
+    if quantity_subject(question):
+        # A value lookup needs evidence about the requested metric, not just a
+        # document title or shared words such as "average" and "time".
+        candidates = [item for item in candidates if coverage(question, item["text"]) >= .75]
     if focus(question) != question or re.search(r"什么是|是什么", question):
         candidates = [item for item in candidates if coverage(question, item["text"] + " " +
                       item.get("document_name", "") + " " + item.get("knowledge_base_name", "")) >= .75]

@@ -66,12 +66,88 @@ def test_semantic_verifier_receives_explicit_citation_numbers(monkeypatch):
     class Judge:
         def invoke(self, messages):
             seen.append(json.loads(messages[-1].content))
-            return AIMessage(content='{"answerable":true,"checks":[{"claim_id":1,"supported":true,"source_ids":[1]}]}')
+            return AIMessage(content='{"answerable":true,"checks":[{"claim_id":1,"supported":true,"relevant":true,"source_ids":[1]}]}')
     monkeypatch.setattr(answering, "configured_llm", lambda *args: Judge())
     result = verify_answer("报销上限500元 [1]", [{"text":"报销上限500元", "chunk_id":"opaque-id"}],
                            Settings(_env_file=None, citation_verifier="llm"), "报销上限")
     assert result["passed"] and seen[0]["sources"][0]["citation"] == 1
     assert "chunk_id" not in seen[0]["sources"][0]
+
+
+def test_metric_lookup_rejects_generic_average_time_matches(client):
+    from app.services.evidence import quantity_subject, terms
+    question = "设备可靠性上平均无故障时间为多少？"
+    right = {"id": "metric", "text": "设备可靠性：平均无故障时间≥120小时，无故障时间占比≥98%。"}
+    wrong = {"id": "kanban", "text": "软件开发的平均吞吐率与平均前置时间有关。设备上任务切换影响平均时间。",
+             "document_name": "设备可靠性平均无故障时间.md", "retrieval_score": 1}
+    assert not {"上", "为", "多少"} & terms(question)
+    assert quantity_subject(question) == "设备可靠性上平均无故障时间"
+    assert not quantity_subject("设备寿命和检修周期分别是多少？")
+    assert rerank_candidates(question, [wrong, right], 5) == [right]
+    assert "120" in answering._extract(question, [right])
+
+
+def test_supported_but_irrelevant_claim_fails_verification(monkeypatch):
+    import json
+
+    from app.config import Settings
+    from app.services.verification import verify_answer
+    from langchain_core.messages import AIMessage
+    class Judge:
+        def invoke(self, messages):
+            return AIMessage(content=json.dumps({"answerable": True, "checks": [
+                {"claim_id": 1, "supported": True, "relevant": True, "source_ids": [1]},
+                {"claim_id": 2, "supported": True, "relevant": False, "source_ids": [2]}]}))
+    monkeypatch.setattr(answering, "configured_llm", lambda *args: Judge())
+    result = verify_answer("平均无故障时间≥120小时 [1]。精益看板管理开发任务 [2]。",
+                           [{"text": "平均无故障时间≥120小时"}, {"text": "精益看板管理开发任务"}],
+                           Settings(_env_file=None, citation_verifier="llm"), "平均无故障时间为多少？")
+    assert not result["passed"] and not result["abstain"]
+    assert result["issues"] == ["irrelevant_claim"]
+    assert result["irrelevant_claims"] == ["精益看板管理开发任务 [2]。"]
+
+
+def test_final_sources_exclude_uncited_results_and_preserve_code_indices():
+    from app.services.verification import compact_citations
+    sources = [{"text": "unused"}, {"text": "second", "page": 8}, {"text": "third", "page": 12}]
+    answer, used = compact_citations("查看 ht[0]：指标≥120小时 [3]，条件见 [2][3]。", sources)
+    assert answer == "查看 ht[0]：指标≥120小时 [1]，条件见 [2][1]。"
+    assert used == [sources[2], sources[1]]
+
+
+def test_irrelevant_answer_is_repaired_and_only_used_sources_returned(client, monkeypatch):
+    import json
+
+    from app.config import get_settings
+    from langchain_core.messages import AIMessage
+    settings = get_settings()
+    monkeypatch.setattr(settings, "cache_ttl", 0)
+    monkeypatch.setattr(settings, "llm_provider", "ollama")
+    monkeypatch.setattr(settings, "llm_model", "fixture")
+    monkeypatch.setattr(settings, "citation_verifier", "llm")
+    candidate = {"id": "c", "chunk_id": "c", "document_id": "d", "knowledge_base_id": "k",
+                 "document_name": "合成设备规范.txt", "text": "设备可靠性：平均无故障时间≥120小时，无故障时间占比≥98%。", "score": .03}
+    monkeypatch.setattr(answering, "retrieve", lambda *args, **kwargs: [candidate])
+    calls = []
+    class Model:
+        def invoke(self, messages):
+            prompt = messages[0].content
+            calls.append(prompt)
+            if "核验器" in prompt:
+                data = json.loads(messages[-1].content)
+                return AIMessage(content=json.dumps({"answerable": True, "checks": [
+                    {"claim_id": claim["claim_id"], "supported": True,
+                     "relevant": "占比" not in claim["text"] and "看板" not in claim["text"], "source_ids": [1]}
+                    for claim in data["claims"]]}))
+            if "证据整理助手" in prompt:
+                return AIMessage(content="平均无故障时间应不小于120小时 [1]。")
+            return AIMessage(content="平均无故障时间≥120小时 [1]。无故障时间占比≥98% [1]。无法回答精益看板问题 [1]。")
+    monkeypatch.setattr(answering, "configured_llm", lambda *args: Model())
+    result = answering.answer_question("设备可靠性上平均无故障时间为多少？", [candidate])
+    assert result["answer"] == "平均无故障时间≥120小时 [1]。"
+    assert result["verification"]["passed"] and result["usage"]["model_calls"] == 3
+    assert len(result["citations"]) == 1 and len(calls) == 3
+    assert result["usage"]["repair"]["mode"] == "retain_verified_claims"
 
 
 def test_standalone_short_question_does_not_inherit_previous_topic(client, monkeypatch):

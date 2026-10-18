@@ -397,7 +397,6 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(healthTimer); clearT
     <div v-if="mobileNav" class="sidebar-overlay" @click="mobileNav = false"></div>
     <aside class="sidebar" :class="{ mobile: mobileNav }">
       <button class="brand" @click="go('library')"><span class="brand-mark"><Layers3 :size="23" /></span><span>知衡<small>KNOWLEDGE OS</small></span></button>
-      <div class="workspace-switch"><span class="workspace-avatar">{{ user.name?.slice(0, 1) || '知' }}</span><span><strong>我的知识工作台</strong><small>Knowledge workspace</small></span><ChevronDown :size="14" /></div>
       <span class="nav-heading">工作空间 <span>WORKSPACE</span></span>
       <nav><button v-for="item in navItems" :key="item.id" class="nav-link" :class="{ active: view === item.id }" @click="go(item.id)"><component :is="item.icon" :size="19" /><span>{{ item.label }}</span><span v-if="item.id === 'library' && knowledgeBases.length" class="nav-count">{{ knowledgeBases.length }}</span><ChevronRight v-if="view === item.id" class="nav-arrow" :size="15" /></button></nav>
       <div class="sidebar-note"><span class="note-icon"><Sparkles :size="16" /></span><strong>每个答案，都有出处。</strong><p>从原文到洞察，<br>构建你的可信知识网络。</p><button @click="go('chat')">开始一次提问 <ArrowRight :size="14" /></button></div>
