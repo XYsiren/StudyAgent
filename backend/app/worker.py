@@ -103,7 +103,18 @@ def process_job(database, settings, job_id):
         path = Path(stored_path).resolve()
         if not path.is_relative_to((settings.data_dir / "uploads").resolve()):
             raise ValueError("文件存储路径不在 uploads 目录内")
-        parsed = chunk_pages(parse_document(path, filename))
+        def report(processed, total, stage="生成向量"):
+            with database.session() as db:
+                changed = db.execute(update(IngestionJob).where(IngestionJob.id == job_id,
+                    IngestionJob.lease_token == lease, IngestionJob.status == "processing").values(
+                    stage=stage, processed_pages=processed if stage != "生成向量" else IngestionJob.processed_pages,
+                    total_pages=total if stage != "生成向量" else IngestionJob.total_pages,
+                    progress=(35 + int(50 * processed / max(total, 1))) if stage == "生成向量" else
+                        (2 + int(30 * processed / max(total, 1))), updated_at=utcnow()))
+                db.commit()
+                if not changed.rowcount:
+                    raise ValueError("任务已取消、删除或租约已变化")
+        parsed = chunk_pages(parse_document(path, filename, progress=report))
         indexed = [{"id": str(uuid.uuid5(uuid.UUID(revision_id), str(item["ordinal"]))), "document_id": document_id, "document_name": filename,
             "knowledge_base_id": kb_id, "revision_id": revision_id, **item} for item in parsed]
 
@@ -120,13 +131,13 @@ def process_job(database, settings, job_id):
                 yield
                 db.commit()
 
-        index_chunks(indexed, write_fence=fence)
+        index_chunks(indexed, write_fence=fence, progress=report)
         with database.session() as db:
             doc = db.scalar(select(Document).where(Document.id == document_id).with_for_update())
             if not doc:
                 return
             owned = db.execute(update(IngestionJob).where(IngestionJob.id == job_id,
-                IngestionJob.lease_token == lease, IngestionJob.status == "processing").values(progress=90))
+                IngestionJob.lease_token == lease, IngestionJob.status == "processing").values(progress=90, stage="发布新版本"))
             job = db.get(IngestionJob, job_id)
             if not owned.rowcount or not job:
                 return
@@ -149,6 +160,7 @@ def process_job(database, settings, job_id):
             db.execute(update(CleanupTask).where(CleanupTask.document_id == document_id,
                 CleanupTask.revision_id == revision_id, CleanupTask.status == "queued").values(status="completed"))
             job.status, job.progress, job.error = "completed", 100, None
+            job.stage = "已完成"
             job.lease_token = job.lease_expires_at = None
             db.commit()
     except Exception as exc:

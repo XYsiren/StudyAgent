@@ -50,8 +50,8 @@ def main():
                 'RAG_TEST_REDIS_URL': original.redis_url, 'RAG_TEST_QDRANT_URL': original.qdrant_url,
                 'RAG_QDRANT_API_KEY': original.qdrant_api_key}
             junit = temporary / 'junit.xml'
-            completed = subprocess.run([sys.executable, '-m', 'pytest', '-q', '--junitxml=' + str(junit)],
-                cwd=ROOT / 'backend', env=environment, check=False)
+            completed = subprocess.run([sys.executable, '-m', 'pytest', '-vv', '-o', 'faulthandler_timeout=60', '--junitxml=' + str(junit)],
+                cwd=ROOT / 'backend', env={**environment, 'PYTHONUNBUFFERED': '1'}, check=False, timeout=600)
             tree = ET.parse(junit).getroot()
             report['tests'] = {key: sum(int(suite.attrib.get(key, 0)) for suite in tree.iter('testsuite'))
                 for key in ['tests', 'failures', 'errors', 'skipped']}

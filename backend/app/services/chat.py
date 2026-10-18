@@ -18,6 +18,8 @@ from app.services.corpus import CorpusScope
 def run_chat(body, db, user, request, emit=None, cancelled=None):
     from app.services.answering import PROMPT_VERSION, answer_question
     settings, database = request.app.state.settings, request.app.state.database
+    from app.services.operations import effective_settings
+    settings = effective_settings(db, settings, user.id)
     key = body.request_id or new_id()
     digest = hashlib.sha256(json.dumps(body.model_dump(exclude={"request_id"}), sort_keys=True).encode()).hexdigest()
     conversation = db.scalar(select(Conversation).where(Conversation.id == body.conversation_id,

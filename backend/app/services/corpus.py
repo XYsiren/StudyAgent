@@ -43,14 +43,17 @@ class CorpusScope:
     def hydrate(self, ids):
         if not ids:
             return {}
-        rows = self.db.execute(select(Chunk, Document).join(Document).where(
+        rows = self.db.execute(select(Chunk, Document, KnowledgeBase.name).select_from(Chunk)
+            .join(Document, Document.id == Chunk.document_id).join(KnowledgeBase, KnowledgeBase.id == Document.knowledge_base_id).where(
             *self.conditions, Chunk.id.in_(ids))).all()
         return {c.id: {"id": c.id, "document_id": d.id, "document_name": d.name,
             "knowledge_base_id": d.knowledge_base_id, "text": c.text, "page": c.page,
-            "ordinal": c.ordinal, "revision_id": c.revision_id, "source": d.source} for c, d in rows}
+            "ordinal": c.ordinal, "revision_id": c.revision_id, "source": d.source,
+            "knowledge_base_name": name} for c, d, name in rows}
 
     def sparse(self, question, limit):
-        words = list(dict.fromkeys(t for t in tokenize(question) if len(t) <= 128))[:64]
+        from app.services.evidence import terms
+        words = sorted(t for t in terms(question) if len(t) <= 128)[:64]
         if not words:
             return [], {}
         statistics = self.db.execute(select(func.count(Chunk.id), func.avg(Chunk.token_count))
@@ -70,6 +73,30 @@ class CorpusScope:
             func.sum(bm25).desc(), ChunkTerm.chunk_id).limit(limit)
         hits = self.db.execute(query).all()
         return [r[0] for r in hits], {r[0]: float(r[1]) for r in hits}
+
+    def expand_neighbors(self, candidates):
+        """Bounded same-page context avoids severing definitions from adjacent code."""
+        if not candidates:
+            return candidates
+        windows = [and_(Chunk.document_id == c["document_id"], Chunk.revision_id == c["revision_id"],
+                        Chunk.ordinal.between(c["ordinal"] - 1, c["ordinal"] + 1),
+                        Chunk.page == c.get("page")) for c in candidates]
+        rows = self.db.scalars(select(Chunk).join(Document).where(*self.conditions, or_(*windows))
+                               .order_by(Chunk.ordinal)).all()
+        from app.services.evidence import clean_pdf_text, clean_text
+        expanded = []
+        for candidate in candidates:
+            group = [row for row in rows if row.document_id == candidate["document_id"]
+                     and row.page == candidate.get("page") and abs(row.ordinal-candidate["ordinal"]) <= 1]
+            text = ""
+            for row in group:
+                part = clean_text(row.text)
+                if candidate["document_name"].lower().endswith(".pdf"):
+                    part = clean_pdf_text(part)
+                overlap = next((n for n in range(min(len(text),len(part),200), 19, -1) if text.endswith(part[:n])), 0)
+                text += ("\n\n" if text and not overlap else "") + part[overlap:]
+            expanded.append({**candidate, "text": text or candidate["text"], "context_chunk_ids": [row.id for row in group]})
+        return expanded
 
     def dense_filter(self):
         from qdrant_client import models

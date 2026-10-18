@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,9 +44,12 @@ def _image_text(data: bytes) -> str:
         import pytesseract
 
         try:
-            parts.append(pytesseract.image_to_string(image, lang="chi_sim+eng"))
-        except (pytesseract.TesseractNotFoundError, pytesseract.TesseractError) as exc:
-            raise ValueError("OCR 需要安装 Tesseract 及 chi_sim/eng 语言包，或配置视觉模型") from exc
+            parts.append(pytesseract.image_to_string(image, lang="chi_sim+eng", timeout=s.ocr_timeout))
+        except (pytesseract.TesseractNotFoundError, pytesseract.TesseractError, RuntimeError) as exc:
+            if not s.vision_model:
+                raise ValueError("OCR 不可用或超时，请安装 Tesseract 和语言包或配置视觉模型") from exc
+        if parts and len(parts[0].strip()) >= 40:
+            return parts[0].strip()
     if s.vision_model and (s.llm_provider == "ollama" or s.llm_api_key):
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -66,36 +70,54 @@ def _image_text(data: bytes) -> str:
     return "\n\n".join(p.strip() for p in parts if p.strip())
 
 
-def parse_document(path: Path, filename: str) -> list[ParsedPage]:
+def parse_document(path: Path, filename: str, progress=None) -> list[ParsedPage]:
     ext = Path(filename).suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"不支持 {ext or '无扩展名'} 格式，请上传 PDF、DOCX、文本或图片")
     if ext == ".pdf":
-        from pypdf import PdfReader
-
-        reader = PdfReader(path)
-        if reader.is_encrypted:
-            raise ValueError("PDF 已加密，请解除密码后重试")
-        if len(reader.pages) > 2000:
-            raise ValueError("PDF 超过 2000 页，请分拆后上传")
-        pages, rendered = [], None
-        for number, page in enumerate(reader.pages, 1):
-            text = page.extract_text() or ""
-            has_images = bool(list(page.images))
-            if has_images and (not text.strip() or get_settings().vision_model):
-                if rendered is None:
-                    import pypdfium2
-                    rendered = pypdfium2.PdfDocument(path)
-                image = rendered[number - 1].render(scale=1.5).to_pil()
-                buf = io.BytesIO()
-                image.save(buf, format="PNG")
-                image.close()
-                caption = _image_text(buf.getvalue())
-                text = "\n\n".join(p for p in (text, caption) if p.strip())
-            pages.append(ParsedPage(text, number))
-        if rendered is not None:
+        import pypdfium2
+        try:
+            rendered = pypdfium2.PdfDocument(path)
+        except pypdfium2.PdfiumError as exc:
+            raise ValueError("PDF 无法打开，可能已加密或文件损坏") from exc
+        try:
+            total, pages = len(rendered), []
+            if total > 2000:
+                raise ValueError("PDF 超过 2000 页，请分拆后上传")
+            for index in range(total):
+                if progress:
+                    progress(index, total, "读取文字层")
+                page = rendered[index]
+                try:
+                    textpage = page.get_textpage()
+                    try:
+                        from app.services.evidence import clean_pdf_text
+                        text = clean_pdf_text(textpage.get_text_range())
+                    finally:
+                        textpage.close()
+                    # Prefer existing searchable text; vision is expensive and unnecessary on text pages.
+                    has_images = any(page.get_objects(filter=[pypdfium2.raw.FPDF_PAGEOBJ_IMAGE]))
+                    if get_settings().pdf_vision_all_pages or (has_images and len(re.sub(r"\s", "", text)) < 40):
+                        if progress:
+                            progress(index, total, "OCR / 视觉识别")
+                        bitmap = page.render(scale=1.5)
+                        image = bitmap.to_pil()
+                        try:
+                            buf = io.BytesIO()
+                            image.save(buf, format="PNG")
+                            caption = _image_text(buf.getvalue())
+                            text = "\n\n".join(p for p in (text, caption) if p.strip())
+                        finally:
+                            image.close()
+                            bitmap.close()
+                    pages.append(ParsedPage(text, index + 1))
+                finally:
+                    page.close()
+                if progress:
+                    progress(index + 1, total, "解析完成")
+            return pages
+        finally:
             rendered.close()
-        return pages
     if ext == ".docx":
         from docx import Document
 
@@ -115,6 +137,9 @@ def parse_document(path: Path, filename: str) -> list[ParsedPage]:
     if ext in {".png", ".jpg", ".jpeg", ".webp"}:
         return [ParsedPage(_image_text(path.read_bytes()))]
     text = _decode(path.read_bytes())
+    if ext == ".md":
+        from app.services.evidence import clean_text
+        text = clean_text(text)
     if ext in {".html", ".htm"}:
         from bs4 import BeautifulSoup
 

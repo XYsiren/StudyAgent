@@ -45,8 +45,10 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".html", ".htm", ".pdf", ".docx", ".png", ".jpg", ".jpeg", ".webp"}
 
 
-def user_payload(user):
-    return {"id": user.id, "email": user.email, "name": user.name}
+def user_payload(user, settings=None):
+    from app.services.operations import is_platform_admin
+    return {"id": user.id, "email": user.email, "name": user.name,
+            "is_platform_admin": bool(settings and is_platform_admin(user, settings))}
 
 
 def auth_payload(user, request, db, response):
@@ -59,7 +61,7 @@ def auth_payload(user, request, db, response):
     db.commit()
     response.set_cookie("rag_session", token, httponly=True, samesite="lax", path="/api",
         secure=settings.cookie_secure or settings.public_base_url.startswith("https://"), max_age=settings.token_lifetime_seconds)
-    return {"access_token": token, "token_type": "bearer", "user": user_payload(user)}
+    return {"access_token": token, "token_type": "bearer", "user": user_payload(user, settings)}
 
 
 def own_kb(db, user, kb_id, action="read"):
@@ -147,8 +149,8 @@ def login(body: LoginRequest, request: Request, response: Response, db: DB):
 
 
 @router.get("/auth/me")
-def me(user: CurrentUser):
-    return user_payload(user)
+def me(user: CurrentUser, request: Request):
+    return user_payload(user, request.app.state.settings)
 
 
 @router.post("/auth/logout", status_code=204)
@@ -384,7 +386,8 @@ def job_status(job_id: str, db: DB, user: CurrentUser):
     if job is None:
         raise HTTPException(404, "任务不存在")
     return {"id": job.id, "status": job.status, "progress": job.progress,
-            "error": job.error, "document_id": job.document_id}
+            "error": job.error, "document_id": job.document_id, "stage": job.stage,
+            "processed_pages": job.processed_pages, "total_pages": job.total_pages}
 
 
 def perform_chat(body, db, user, request):
@@ -522,7 +525,8 @@ def create_evaluation(body: EvaluationRequest, request: Request, db: DB, user: C
                 raise HTTPException(400, "历史答案缺少对应问题")
             case.update(question=question_message.content, recorded_answer=recorded.content,
                 recorded_citations=recorded.citations or [])
-    settings = request.app.state.settings
+    from app.services.operations import effective_settings
+    settings = effective_settings(db, request.app.state.settings, user.id)
     consume(request.app.state.database, f"evaluation:{user.id}", 5, 60)
     consume(request.app.state.database, f"model-budget:{user.id}", settings.user_daily_model_requests,
             86400, cost=len(cases) * (6 if body.use_ragas else 1))

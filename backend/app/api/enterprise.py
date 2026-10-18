@@ -320,9 +320,12 @@ def models_ready(request: Request, user: CurrentUser):
 @router.get("/operations")
 def operations(request: Request, db: DB, user: CurrentUser):
     from app.services.access import allowed_kbs
+    from app.services.operations import effective_settings, is_platform_admin
+    settings = effective_settings(db, request.app.state.settings, user.id)
     jobs = db.execute(select(IngestionJob.status, func.count()).join(Document).join(KnowledgeBase)
         .where(allowed_kbs(user.id)).group_by(IngestionJob.status)).all()
     return {"ingestion_jobs": dict(jobs), "limits": {
-        key: getattr(request.app.state.settings, key) for key in ["user_storage_mb", "max_pending_jobs",
+        key: getattr(settings, key) for key in ["user_storage_mb", "max_pending_jobs",
             "max_active_chats", "global_active_chats", "user_daily_model_requests"]},
-        "my_audit_events": db.scalar(select(func.count()).select_from(AuditEvent).where(AuditEvent.actor_id == user.id))}
+        "my_audit_events": db.scalar(select(func.count()).select_from(AuditEvent).where(AuditEvent.actor_id == user.id)),
+        "is_platform_admin": is_platform_admin(user, request.app.state.settings)}

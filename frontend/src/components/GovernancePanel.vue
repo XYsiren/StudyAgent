@@ -2,19 +2,24 @@
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { KnowledgeBase } from '../api'
+import PlatformPanel from './PlatformPanel.vue'
 function roleLabel(role: string) { return ({ admin: '管理员', editor: '编辑', reader: '只读成员' } as Record<string, string>)[role] || role }
 type Org = { id: string; name: string; role: string }
 type Member = { id: string; email: string; name?: string; role: string }
 const props = defineProps<{ onChanged: () => Promise<void> }>()
 const organizations = ref<Org[]>([]), selected = ref(''), members = ref<Member[]>([])
 const name = ref(''), email = ref(''), role = ref('reader'), error = ref(''), busy = ref(false)
-type Operations = { ingestion_jobs: Record<string, number>; limits: Record<string, number>; my_audit_events: number }
+type Operations = { ingestion_jobs: Record<string, number>; limits: Record<string, number>; my_audit_events: number; is_platform_admin: boolean }
 const events = ref<Record<string, unknown>[]>([]), operations = ref<Operations | null>(null)
 const limitLabels: Record<string, string> = { user_storage_mb: '存储配额（MB）', max_pending_jobs: '待处理任务上限', max_active_chats: '同时问答上限', global_active_chats: '服务同时问答上限', user_daily_model_requests: '每日模型请求预算' }
-const statusLabels: Record<string, string> = { queued: '排队中', processing: '处理中', completed: '已完成', failed: '需重试' }
+const statusLabels: Record<string, string> = { queued: '排队中', processing: '处理中', completed: '已完成', failed: '需重试', cancelled: '已取消' }
 function actionLabel(value: unknown) {
   const labels: Record<string, string> = { 'session.create': '登录工作台', 'session.revoke': '退出登录', 'session.revoke_all': '退出所有设备', 'organization.create': '创建组织', 'knowledge_base.create': '创建知识库', 'knowledge_base.delete': '删除知识库', 'document.upload': '上传文档', 'document.version.upload': '更新文档版本', 'document.reindex': '重新索引文档', 'document.source.sync': '同步文档来源', 'document.restore': '恢复文档版本', 'document.metadata': '更新来源与有效期', 'document.download': '下载原文', 'document.version.download': '下载历史版本', 'document.delete': '删除文档', 'chat.complete': '完成问答', 'evaluation.create': '提交评测', 'membership.remove': '移除组织成员', 'knowledge_base.revoke': '撤销知识库授权' }
   const action = String(value)
+  if (action === 'platform.quotas.update') return '更新运行配额'
+  if (action === 'platform.quotas.reset') return '恢复默认配额'
+  if (action === 'platform.job.cancel') return '取消处理任务'
+  if (action === 'platform.job.retry') return '重试处理任务'
   if (action.startsWith('membership.set_role.')) return '更新组织成员角色'
   if (action.startsWith('knowledge_base.grant.')) return '更新知识库授权'
   return labels[action] || action
@@ -53,6 +58,7 @@ onMounted(() => run(refresh))
   <main class="page governance-page">
     <div class="page-heading"><div><span class="eyebrow">WORKSPACE GOVERNANCE</span><h1>团队与治理<span class="heading-dot">.</span></h1><p>管理组织成员、访问角色与操作记录。</p></div><button class="btn secondary" :disabled="busy" @click="run(refresh)">刷新治理状态</button></div>
     <p v-if="error" role="alert" class="gov-error">{{ error }}</p>
+    <PlatformPanel v-if="operations?.is_platform_admin" @changed="run(refresh)" />
     <div class="gov-grid"><section class="panel gov-panel"><h2>组织空间</h2>
       <form @submit.prevent="run(async () => { const org = await api<Org>('/organizations', { method: 'POST', body: JSON.stringify({ name }) }); selected = org.id; name = '' })">
         <label>新组织名称<input v-model="name" required maxlength="120" placeholder="例如：产品与技术中心" /></label><button class="btn primary" :disabled="busy">创建组织</button>
@@ -77,5 +83,5 @@ onMounted(() => run(refresh))
   </main>
 </template>
 <style scoped>
-.gov-limits{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px;margin:20px 0}.gov-limits div{background:#f5f8f6;border:1px solid #e3ebe6;border-radius:10px;padding:18px}.gov-limits small{display:block;color:#718078;font-size:12px}.gov-limits strong{display:block;font-size:26px;margin-top:10px}.gov-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.gov-panel{padding:24px;margin-bottom:20px}.gov-panel h2{margin-bottom:18px;font-size:18px}.gov-panel form{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:20px}.gov-panel label{display:flex;flex-direction:column;gap:8px;font-size:13px;flex:1}.gov-panel input,.gov-panel select{border:1px solid #dce5df;border-radius:8px;padding:10px;background:#fff;min-width:0}.gov-panel pre{font-size:12px;white-space:pre-wrap;line-height:1.7}.gov-muted{color:#6b7c73;font-size:13px;line-height:1.8;margin:12px 0}.gov-member{display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-top:1px solid #edf1ee}.gov-member small{display:block;color:#7b8981;margin-top:4px}.gov-events{overflow:auto}.gov-events table{font-size:12px;width:100%;border-collapse:collapse}.gov-events td,.gov-events th{text-align:left;padding:12px;border-bottom:1px solid #edf1ee;white-space:nowrap}.gov-error{color:#b34747;margin-bottom:20px}@media(max-width:900px){.gov-grid{grid-template-columns:1fr}}
+.gov-limits{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px;margin:20px 0}.gov-limits div{background:#f5f8f6;border:1px solid #e3ebe6;border-radius:10px;padding:18px}.gov-limits small{display:block;color:#718078;font-size:14px}.gov-limits strong{display:block;font-size:26px;margin-top:10px}.gov-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.gov-panel{padding:24px;margin-bottom:20px}.gov-panel h2{margin-bottom:18px;font-size:18px}.gov-panel form{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:20px}.gov-panel label{display:flex;flex-direction:column;gap:8px;font-size:14px;flex:1}.gov-panel input,.gov-panel select{border:1px solid #dce5df;border-radius:8px;padding:10px;background:#fff;min-width:0}.gov-panel pre{font-size:14px;white-space:pre-wrap;line-height:1.7}.gov-muted{color:#6b7c73;font-size:14px;line-height:1.8;margin:12px 0}.gov-member{display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-top:1px solid #edf1ee}.gov-member small{display:block;color:#7b8981;margin-top:4px}.gov-events{overflow:auto}.gov-events table{font-size:14px;width:100%;border-collapse:collapse}.gov-events td,.gov-events th{text-align:left;padding:12px;border-bottom:1px solid #edf1ee;white-space:nowrap}.gov-error{color:#b34747;margin-bottom:20px}@media(max-width:900px){.gov-grid{grid-template-columns:1fr}}
 </style>

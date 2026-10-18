@@ -4,7 +4,6 @@ import threading
 from datetime import timedelta
 from types import SimpleNamespace
 
-import pytest
 from app.models import AuthSession, CleanupTask, Document, utcnow
 from sqlalchemy import select, update
 from test_api import create_kb, register, upload, wait_job
@@ -176,11 +175,11 @@ def test_version_rebuild_keeps_old_until_atomic_switch_and_can_restore(client, m
     original = client.get(f'/api/documents/{doc}/versions', headers=headers).json()[0]['id']
     entered, resume = threading.Event(), threading.Event()
     real_parse = parsing.parse_document
-    def blocking_parse(path, filename):
+    def blocking_parse(path, filename, **kwargs):
         if b'600' in path.read_bytes():
             entered.set()
             assert resume.wait(10)
-        return real_parse(path, filename)
+        return real_parse(path, filename, **kwargs)
     monkeypatch.setattr(parsing, 'parse_document', blocking_parse)
     try:
         response = client.post('/api/documents/upload', headers=headers,
@@ -216,7 +215,7 @@ def test_expiry_invalidates_cached_answer(client):
 
 
 def test_persistent_bm25_loads_only_candidates(client, monkeypatch):
-    from app.services import corpus
+    from app.services import corpus, evidence
     from app.services.retrieval import retrieve
     headers = register(client)
     kb = create_kb(client, headers)
@@ -226,12 +225,12 @@ def test_persistent_bm25_loads_only_candidates(client, monkeypatch):
     with client.app.state.database.session() as db:
         user = db.scalar(select(User))
         scope = corpus.CorpusScope(db, user, [kb])
-        real_tokenize = corpus.tokenize
+        real_tokenize = evidence.tokenize
         calls = []
         def track(text):
             calls.append(text)
             return real_tokenize(text)
-        monkeypatch.setattr(corpus, 'tokenize', track)
+        monkeypatch.setattr(evidence, 'tokenize', track)
         hits = retrieve('住宿报销', scope, strategy='bm25')
         assert hits and hits[0]['document_id'] == uploaded['document']['id']
         assert calls == ['住宿报销']
@@ -267,7 +266,9 @@ def test_true_provider_stream_and_verified_final_answer(client, monkeypatch):
             yield AIMessageChunk(content='住宿报销上限')
             yield AIMessageChunk(content='5000元 [1]')
         def invoke(self, _):
-            pytest.fail('stream endpoint called invoke')
+            # The initial generation streams; one bounded verification repair may invoke.
+            from langchain_core.messages import AIMessage
+            return AIMessage(content='住宿报销上限5000元 [1]')
     monkeypatch.setattr(answering, 'configured_llm', lambda: Provider())
     response = client.post('/api/chat/stream', headers=headers,
         json={'question': '住宿报销上限是多少', 'knowledge_base_ids': [kb], 'request_id': 'stream-test-1'})

@@ -43,6 +43,7 @@ const preview = ref<{ document: Document; chunks: Chunk[] } | null>(null)
 const previewLoading = ref(false)
 const previewingId = ref('')
 const deleting = ref('')
+const pendingDelete = ref<Document | null>(null)
 const selectedKb = computed(() => knowledgeBases.value.find(kb => kb.id === selectedKbId.value))
 const selectedDocuments = computed(() => documents.value.filter(doc => !selectedKbId.value || doc.knowledge_base_id === selectedKbId.value))
 const filteredDocuments = computed(() => selectedDocuments.value.filter(doc => doc.name.toLowerCase().includes(documentQuery.value.toLowerCase())))
@@ -129,7 +130,7 @@ function bytes(value: number) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`
 }
 function statusText(status: string) {
-  return ({ ready: '已就绪', completed: '已完成', queued: '排队中', pending: '排队中', processing: '处理中', running: '运行中', parsing: '解析中', indexing: '索引中', failed: '处理失败' } as Record<string, string>)[status] || status
+  return ({ ready: '已就绪', completed: '已完成', queued: '排队中', pending: '排队中', processing: '处理中', cancelled: '已取消', running: '运行中', parsing: '解析中', indexing: '索引中', failed: '处理失败' } as Record<string, string>)[status] || status
 }
 function progress(doc: Document) {
   const value = doc.job_id ? jobs.value[doc.job_id]?.progress || 0 : 0
@@ -174,7 +175,7 @@ async function signIn() {
 function logout() {
   void api('/auth/logout', { method: 'POST' }).catch(() => {})
   chatController?.abort()
-  localStorage.removeItem('zhiheng_token'); user.value = null; documents.value = []; knowledgeBases.value = []
+  localStorage.removeItem('zhiheng_token'); pendingDelete.value = null; user.value = null; documents.value = []; knowledgeBases.value = []
   runtime.value = null; conversations.value = []; messages.value = []; evaluations.value = []; evaluation.value = null
   conversationId.value = ''; selectedKbId.value = ''; error.value = ''; auth.value.password = ''
 }
@@ -201,12 +202,13 @@ async function uploadFiles(files: FileList | File[] | null) {
   dragging.value = false
   if (!files?.length) return
   if (!selectedKbId.value) { error.value = '请先创建并选择一个知识库。'; return }
+  const targetKbId = selectedKbId.value
   uploading.value = true; error.value = ''
   let count = 0
   try {
     for (const file of Array.from(files)) {
       if (file.size > (runtime.value?.max_upload_mb || 50) * 1024 * 1024) { error.value = `“${file.name}”超过 ${runtime.value?.max_upload_mb || 50} MB 上限。`; continue }
-      const form = new FormData(); form.append('file', file); form.append('knowledge_base_id', selectedKbId.value)
+      const form = new FormData(); form.append('file', file); form.append('knowledge_base_id', targetKbId)
       await api<{ document: Document; job_id: string }>('/documents/upload', { method: 'POST', body: form }); count++
     }
     await refreshDocuments()
@@ -222,7 +224,7 @@ async function refreshDocuments() {
 }
 async function pollJobs() {
   if (pollRunning || !user.value) return
-  const active = documents.value.filter(doc => !['ready', 'completed', 'failed'].includes(doc.status) && doc.job_id)
+  const active = documents.value.filter(doc => !['ready', 'completed', 'failed', 'cancelled'].includes(doc.status) && doc.job_id)
   if (!active.length) return
   pollRunning = true
   try {
@@ -235,9 +237,19 @@ async function pollJobs() {
   } finally { pollRunning = false }
 }
 async function removeDocument(doc: Document) {
-  if (!window.confirm(`删除文档“${doc.name}”及对应索引？`)) return
+  error.value = ''
+  pendingDelete.value = doc
+}
+async function confirmDeleteDocument() {
+  const doc = pendingDelete.value
+  if (!doc) return
   deleting.value = doc.id
-  try { await api(`/documents/${doc.id}`, { method: 'DELETE' }); await refreshDocuments(); notify('文档已删除。') }
+  try {
+    await api(`/documents/${doc.id}`, { method: 'DELETE' })
+    documents.value = documents.value.filter(item => item.id !== doc.id)
+    pendingDelete.value = null
+    await refreshDocuments(); notify('文档已删除，相关任务已停止；文件与向量将在后台清理。')
+  }
   catch (reason) { fail(reason) } finally { deleting.value = '' }
 }
 async function retryDocument(doc: Document) {
@@ -365,6 +377,7 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(healthTimer); clearT
 </script>
 
 <template>
+  <div v-if="pendingDelete" class="modal-backdrop" @click.self="!deleting && (pendingDelete=null)"><section class="modal deletion-dialog" role="dialog" aria-modal="true" aria-label="删除文档确认"><h2>删除文档</h2><p>{{pendingDelete.name}}</p><p>将取消该文档的解析或索引任务，并删除文档与版本引用。原文件和向量由后台清理，此操作无法撤销。</p><p v-if="error" class="gov-error" role="alert">{{error}}</p><div class="platform-actions"><button class="btn secondary" :disabled="!!deleting" @click="pendingDelete=null">保留文档</button><button class="btn primary" :disabled="!!deleting" @click="confirmDeleteDocument">{{deleting ? '正在取消任务并删除…' : '确认删除'}}</button></div></section></div>
   <div v-if="restoring" class="restore-screen"><div class="brand-mark"><Layers3 :size="27" /></div><LoaderCircle class="spin" :size="21" /><p>正在连接知识工作台…</p></div>
   <div v-else-if="!user" class="auth-shell">
     <div class="auth-story">
@@ -406,7 +419,7 @@ onUnmounted(() => { clearInterval(pollTimer); clearInterval(healthTimer); clearT
           <input ref="fileInput" type="file" multiple class="hidden" accept=".pdf,.docx,.txt,.md,.csv,.json,.html,.htm,.png,.jpg,.jpeg,.webp" @change="uploadFiles(($event.target as HTMLInputElement).files)" />
           <button class="upload-zone" :class="{ dragging, disabled: !selectedKbId || uploading }" :disabled="!selectedKbId || uploading || selectedKb?.role === 'reader'" @click="fileInput?.click()" @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="uploadFiles($event.dataTransfer?.files || null)"><span class="upload-illustration"><LoaderCircle v-if="uploading" :size="25" class="spin" /><UploadCloud v-else :size="26" /></span><span><strong>{{ uploading ? '正在提交文件…' : '将文件拖到这里，或' }} <em v-if="!uploading">点击上传</em></strong><small>PDF、Word、文本、图片等多格式 · 单文件不超过 {{ runtime?.max_upload_mb || 50 }} MB</small></span><span class="upload-tag">异步解析 · 自动索引</span></button>
           <div class="table-toolbar"><span>文档列表 <strong>{{ selectedDocuments.length }}</strong></span><label class="search-input"><Search :size="16" /><input v-model="documentQuery" placeholder="搜索文档名称…" aria-label="搜索文档" /></label></div>
-          <div class="table-scroll"><table class="documents-table"><thead><tr><th>文档名称</th><th>状态</th><th>知识分块</th><th>上传时间</th><th class="align-right">操作</th></tr></thead><tbody><tr v-for="doc in filteredDocuments" :key="doc.id"><td><div class="document-name"><span class="file-icon"><FileText :size="21" /></span><div><button class="doc-link" @click="openPreview(doc)">{{ doc.name }}</button><small>{{ bytes(doc.size_bytes) }} <span v-if="doc.error" class="document-error" :title="doc.error">· {{ doc.error }}</span></small></div></div></td><td><span class="status-badge" :class="doc.status"><span class="status-dot"></span>{{ documentStatus(doc) }}</span><div v-if="!['ready','completed','failed'].includes(doc.status) && progress(doc)" class="progress-bar"><span :style="{ width: `${progress(doc)}%` }"></span></div></td><td class="muted tabular">{{ doc.chunk_count || '—' }}<small v-if="doc.chunk_count"> 段</small></td><td class="muted tabular">{{ date(doc.created_at) }}</td><td><div class="table-actions"><button v-if="canWrite(doc) && ['failed', 'ready'].includes(doc.status)" class="icon-button" :title="doc.status === 'ready' ? '重新索引' : '重试解析'" :aria-label="doc.status === 'ready' ? '重新索引' : '重试解析'" @click="retryDocument(doc)"><RefreshCw :size="16" /></button><button class="icon-button" title="版本与有效期" aria-label="版本与有效期" @click="versionDocument = doc"><Clock3 :size="16" /></button><button class="icon-button" title="查看解析内容" aria-label="查看解析内容" :disabled="previewLoading && previewingId === doc.id" @click="openPreview(doc)"><LoaderCircle v-if="previewLoading && previewingId === doc.id" :size="16" class="spin" /><FileSearch v-else :size="16" /></button><button class="icon-button" title="下载原文" aria-label="下载原文" @click="download(doc.id, doc.name)"><ArrowDownToLine :size="16" /></button><button v-if="canWrite(doc)" class="icon-button danger-button" title="删除文档" aria-label="删除文档" :disabled="deleting === doc.id" @click="removeDocument(doc)"><Trash2 :size="15" /></button></div></td></tr></tbody></table></div>
+          <div class="table-scroll"><table class="documents-table"><thead><tr><th>文档名称</th><th>状态</th><th>知识分块</th><th>上传时间</th><th class="align-right">操作</th></tr></thead><tbody><tr v-for="doc in filteredDocuments" :key="doc.id"><td><div class="document-name"><span class="file-icon"><FileText :size="21" /></span><div><button class="doc-link" @click="openPreview(doc)">{{ doc.name }}</button><small>{{ bytes(doc.size_bytes) }} <span v-if="doc.error" class="document-error" :title="doc.error">· {{ doc.error }}</span></small></div></div></td><td><span class="status-badge" :class="doc.status"><span class="status-dot"></span>{{ documentStatus(doc) }}</span><small v-if="doc.job_id && jobs[doc.job_id] && ['processing','queued'].includes(doc.status)" class="document-progress">{{jobs[doc.job_id].stage || '等待处理'}} · {{jobs[doc.job_id].progress}}%<span v-if="jobs[doc.job_id].total_pages"> · {{jobs[doc.job_id].processed_pages}} / {{jobs[doc.job_id].total_pages}} 页</span></small><div v-if="!['ready','completed','failed'].includes(doc.status) && progress(doc)" class="progress-bar"><span :style="{ width: `${progress(doc)}%` }"></span></div></td><td class="muted tabular">{{ doc.chunk_count || '—' }}<small v-if="doc.chunk_count"> 段</small></td><td class="muted tabular">{{ date(doc.created_at) }}</td><td><div class="table-actions"><button v-if="canWrite(doc) && ['failed', 'ready'].includes(doc.status)" class="icon-button" :title="doc.status === 'ready' ? '重新索引' : '重试解析'" :aria-label="doc.status === 'ready' ? '重新索引' : '重试解析'" @click="retryDocument(doc)"><RefreshCw :size="16" /></button><button class="icon-button" title="版本与有效期" aria-label="版本与有效期" @click="versionDocument = doc"><Clock3 :size="16" /></button><button class="icon-button" title="查看解析内容" aria-label="查看解析内容" :disabled="previewLoading && previewingId === doc.id" @click="openPreview(doc)"><LoaderCircle v-if="previewLoading && previewingId === doc.id" :size="16" class="spin" /><FileSearch v-else :size="16" /></button><button class="icon-button" title="下载原文" aria-label="下载原文" @click="download(doc.id, doc.name)"><ArrowDownToLine :size="16" /></button><button v-if="canWrite(doc)" class="icon-button danger-button" title="删除文档" aria-label="删除文档" :disabled="deleting === doc.id" @click="removeDocument(doc)"><Trash2 :size="15" /></button></div></td></tr></tbody></table></div>
           <div v-if="!filteredDocuments.length" class="table-empty"><FileText :size="29" /><h3>{{ documentQuery ? '没有找到匹配文档' : '知识积累，从第一份文档开始' }}</h3><p>{{ documentQuery ? '试试其他关键词。' : selectedKbId ? '上传一份文档，系统将自动解析、切块并建立索引。' : '先创建一个知识库，再上传你的文档。' }}</p></div>
           <div class="table-footer"><span><ShieldCheck :size="14" />文档与检索结果按知识库授权范围可见</span><span>共 {{ filteredDocuments.length }} 份文档</span></div>
         </section>

@@ -125,6 +125,8 @@ def create_app(settings=None):
     app.include_router(enterprise_router)
     from app.api.oidc import router as oidc_router
     app.include_router(oidc_router)
+    from app.api.platform import router as platform_router
+    app.include_router(platform_router)
     return app
 
 

@@ -93,6 +93,9 @@ class IngestionJob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     revision_id: Mapped[str | None] = mapped_column(String(36))
     available_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    stage: Mapped[str | None] = mapped_column(String(120))
+    processed_pages: Mapped[int] = mapped_column(Integer, default=0)
+    total_pages: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Conversation(Base):
@@ -244,6 +247,14 @@ class OIDCFlow(Base):
     verifier: Mapped[str] = mapped_column(String(128))
     nonce: Mapped[str] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class OperationalPolicy(Base):
+    __tablename__ = "operational_policies"
+    scope: Mapped[str] = mapped_column(String(80), primary_key=True)
+    limits: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_by: Mapped[str] = mapped_column(String(36))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 Index("ix_job_recovery", IngestionJob.status, IngestionJob.lease_expires_at)

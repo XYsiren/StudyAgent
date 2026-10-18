@@ -9,6 +9,8 @@ from app.services.access import require_kb
 def reserve_ingestion(db, user, kb_id, settings, extra_bytes=0):
     kb = require_kb(db, user, kb_id, "write")
     owner_id = db.scalar(select(User.id).where(User.id == kb.user_id).with_for_update())
+    from app.services.operations import effective_settings
+    settings = effective_settings(db, settings, owner_id)
     db.execute(update(User).where(User.id == owner_id).values(name=User.name))
     db.expire_all()
     require_kb(db, user, kb_id, "write")

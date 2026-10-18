@@ -42,5 +42,5 @@ onUnmounted(() => clearInterval(timer))
   </section></div>
 </template>
 <style scoped>
-.versions-modal{max-width:760px;max-height:90vh;overflow:auto}.versions-modal>p{font-size:13px;color:#718078;line-height:1.8}.versions-modal label{display:flex;flex-direction:column;gap:8px;margin:16px 0;font-size:13px}.versions-modal input{padding:10px;border:1px solid #dce5df;border-radius:8px}.version-list article{display:flex;align-items:center;justify-content:space-between;padding:16px 0;border-top:1px solid #e7ece8}.version-list small,.version-list code{display:block;font-size:11px;margin-top:6px;color:#77867d}.version-error{color:#b34747!important}
+.versions-modal{max-width:760px;max-height:90vh;overflow:auto}.versions-modal>p{font-size:14px;color:#718078;line-height:1.8}.versions-modal label{display:flex;flex-direction:column;gap:8px;margin:16px 0;font-size:14px}.versions-modal input{padding:10px;border:1px solid #dce5df;border-radius:8px}.version-list article{display:flex;align-items:center;justify-content:space-between;padding:16px 0;border-top:1px solid #e7ece8}.version-list small,.version-list code{display:block;font-size:14px;margin-top:6px;color:#77867d}.version-error{color:#b34747!important}
 </style>

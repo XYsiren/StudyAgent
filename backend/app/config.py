@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     verifier_model: str = ""
     evidence_min_coverage: float = Field(default=0.25, ge=0, le=1)
     source_sync_root: Path | None = None
+    platform_admin_emails: list[str] = []
+    pdf_vision_all_pages: bool = False
+    ocr_timeout: int = Field(default=60, ge=5, le=300)
 
     @model_validator(mode="after")
     def validate_runtime(self):

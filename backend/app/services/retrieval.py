@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import uuid
 from contextlib import nullcontext
@@ -36,7 +37,7 @@ def point_id(chunk_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, chunk_id))
 
 
-def index_chunks(chunks: list[dict], write_fence=None) -> None:
+def index_chunks(chunks: list[dict], write_fence=None, progress=None) -> None:
     if not chunks:
         return
     with _lock if not get_settings().qdrant_url else nullcontext():
@@ -47,6 +48,8 @@ def index_chunks(chunks: list[dict], write_fence=None) -> None:
                 for field in ("knowledge_base_id", "document_id", "chunk_id"):
                     store.create_payload_index(name, field, field_schema=models.PayloadSchemaType.KEYWORD)
         for offset in range(0, len(chunks), 64):
+            if progress:
+                progress(offset, len(chunks))
             batch = chunks[offset:offset + 64]
             vectors = embed([c["text"] for c in batch])
             points = [models.PointStruct(id=point_id(c["id"]), vector=v, payload={
@@ -56,6 +59,8 @@ def index_chunks(chunks: list[dict], write_fence=None) -> None:
             # Only vector writes are fenced; expensive embedding holds no SQL lock.
             with write_fence() if write_fence else nullcontext():
                 store.upsert(name, points, wait=True)
+            if progress:
+                progress(min(offset + 64, len(chunks)), len(chunks))
 
 
 def delete_document(document_id: str) -> None:
@@ -84,13 +89,23 @@ def reranker(name: str):
     return CrossEncoder(name, trust_remote_code=False)
 
 
-def rerank_candidates(question: str, candidates: list[dict], top_k: int) -> list[dict]:
-    model = get_settings().reranker_model
+def rerank_candidates(question: str, candidates: list[dict], top_k: int, use_model: bool = True) -> list[dict]:
+    from app.services.evidence import clean_pdf_text, clean_text, coverage, evidence_score, focus
+    candidates = [{**item, "text": clean_text(item["text"])} for item in candidates]
+    candidates = [{**item, "text": clean_pdf_text(item["text"])} if item.get("document_name", "").lower().endswith(".pdf")
+                  else item for item in candidates]
+    candidates = [item for item in candidates if item["text"]]
+    if focus(question) != question or re.search(r"什么是|是什么", question):
+        candidates = [item for item in candidates if coverage(question, item["text"] + " " +
+                      item.get("document_name", "") + " " + item.get("knowledge_base_name", "")) >= .75]
+    model = get_settings().reranker_model if use_model else ""
     if model and candidates:
         values = reranker(model).predict([(question, c["text"]) for c in candidates])
         for item, value in zip(candidates, values, strict=True):
             item["rerank_score"] = float(value)
         candidates.sort(key=lambda c: c["rerank_score"], reverse=True)
+    else:
+        candidates.sort(key=lambda c: (evidence_score(question, c), c.get("retrieval_score", 0)), reverse=True)
     return candidates[:top_k]
 
 
@@ -103,7 +118,7 @@ def retrieve(question: str, chunks: list[dict], top_k: int = 5, strategy: str = 
     from app.services.corpus import CorpusScope
     lazy = isinstance(chunks, CorpusScope)
     by_id = {} if lazy else {c["id"]: c for c in chunks}
-    limit = min(len(chunks), max(20, top_k * 4))
+    limit = min(len(chunks), max(60, top_k * 6))
     dense, sparse = [], []
     dense_scores, sparse_scores = {}, {}
     if strategy != "bm25":
@@ -137,7 +152,7 @@ def retrieve(question: str, chunks: list[dict], top_k: int = 5, strategy: str = 
     ids = sorted(fused, key=lambda cid: fused[cid], reverse=True)[:limit]
     result = [{**by_id[cid], "chunk_id": cid, "score": fused[cid], "retrieval_score": fused[cid],
                "dense_score": dense_scores.get(cid), "bm25_score": sparse_scores.get(cid)} for cid in ids]
-    return rerank_candidates(question, result, top_k) if rerank_results and strategy == "hybrid" else result[:top_k]
+    return rerank_candidates(question, result, top_k, use_model=rerank_results) if strategy == "hybrid" else result[:top_k]
 
 
 def _small_corpus_sparse(question, chunks, limit):

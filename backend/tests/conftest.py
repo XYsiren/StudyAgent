@@ -35,6 +35,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("RAG_AUTO_MIGRATE", "true")
     monkeypatch.setenv("RAG_ALLOW_REGISTRATION", "true")
     monkeypatch.setenv("RAG_WORKER_ROLE", "all")
+    monkeypatch.setenv("RAG_PLATFORM_ADMIN_EMAILS", "[]")
     get_settings.cache_clear()
     from app.services.retrieval import client as vector_client
     vector_client.cache_clear()
