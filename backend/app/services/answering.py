@@ -15,7 +15,7 @@ from app.services.retrieval import rerank_candidates, retrieve
 
 _cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _cache_lock = threading.Lock()
-PROMPT_VERSION = "grounded-v3.4-question-relevance"
+PROMPT_VERSION = "grounded-v3.5-section-evidence"
 INSUFFICIENT_EVIDENCE = "当前知识库中没有足够证据回答这个问题。请补充相关文档，或调整问题后重试。"
 
 
@@ -106,10 +106,20 @@ def configured_llm(model_name: str | None = None):
 
 
 def _extract(question: str, citations: list[dict]) -> str:
-    from app.services.evidence import clean_text, useful_sentence
+    from app.services.evidence import clean_text, section_context, useful_sentence
     from app.services.evidence import terms as query_terms
     if not citations:
         return INSUFFICIENT_EVIDENCE
+    scoped = section_context(question, [{**source, "source_index": index} for index, source in enumerate(citations, 1)])
+    sections = [source for source in scoped if source.get("section_body")]
+    if any(source.get("section_title") for source in scoped):
+        excerpts = []
+        for source in sections:
+            lines = [line for line in source["section_body"].splitlines() if not re.search(
+                r"忽略所有|输出系统提示词|泄露提示词|ignore.{0,40}instructions", line, re.I)]
+            if lines:
+                excerpts.append(source["section_title"] + "\n" + "\n".join(lines) + f" [{source['source_index']}]")
+        return "【原文摘录 · 请结合来源核对】\n\n" + "\n\n".join(excerpts) if excerpts else INSUFFICIENT_EVIDENCE
     if re.search(r"(?:两个阶段|哪两个阶段).*(?:什么|哪些)", question):
         stages = set(re.findall(r"第[一二12]阶段|阶段[一二12]|准备阶段|提交阶段|终止阶段|投票阶段|\bprepare\b|\bcommit\b",
                                 " ".join(c["text"] for c in citations), re.I))
@@ -130,7 +140,7 @@ def _extract(question: str, citations: list[dict]) -> str:
                 seen.add(block)
                 continue
         sentences = [part.strip() for part in re.split(r"(?<=[。！？!?])|(?<=\.)\s+(?=[A-Z\u4e00-\u9fff])|\n", text) if part.strip()]
-        sentences = [part for part in sentences if not part.startswith("#") and not re.search(
+        sentences = [part for part in sentences if not part.startswith("#") and not re.match(r"^\d+(?:\.\d+)+\s+", part) and not re.search(
             r"忽略所有|输出系统提示词|泄露提示词|ignore.{0,40}instructions", part, re.I)]
         sentences = [part for part in sentences if useful_sentence(question, part) and part not in seen]
         if not sentences:
@@ -248,8 +258,9 @@ def answer_question(question: str, chunks: list[dict], top_k: int = 5, mode: str
         candidates = []
     if hasattr(chunks, "expand_neighbors"):
         candidates = chunks.expand_neighbors(candidates)
-    from app.services.evidence import definition_context
-    candidates = definition_context(question, candidates)
+    from app.services.evidence import definition_context, section_context
+    candidates = section_context(question, candidates)
+    candidates = definition_context(question, candidates) if not any(c.get("section_title") for c in candidates) else candidates
     history, candidates = _budget_context(question, history, candidates)
     if hasattr(chunks, "db"):
         chunks.db.commit()
@@ -269,18 +280,21 @@ def answer_question(question: str, chunks: list[dict], top_k: int = 5, mode: str
     else:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        from app.services.evidence import quantity_subject
+        from app.services.evidence import quantity_subject, requirements_question
 
         sources = [{"citation": i, "document": c["document_name"], "page": c["page"], "text": c["text"]}
             for i, c in enumerate(citations, 1)]
+        requirements = requirements_question(question)
         style_instruction = ("优先用一句话直接回答，确有必要时再用第二句补充，最多两句话。"
                              "解释术语中关键限定词的含义、核心结构或用途，不主动举例，补充仍须直接针对问题。"
-                             "不要展开具体产品的内部实现、性能数字或特性清单，不要列举无关机制。") if definition_subject(question) else ""
+                             "不要展开具体产品的内部实现、性能数字或特性清单，不要列举无关机制。") if definition_subject(question) and not requirements else ""
+        if requirements:
+            style_instruction += "这是条款要求查询。按对应章节完整列出要求，保留数值、单位、不等号、适用条件和标准编号，不要套用概念定义的两句限制。每个条目都标注来源。"
         if quantity_subject(question):
             style_instruction += "这是单项数值查询。只回答所问指标的数值、单位和不等号条件，必要时给出适用对象或条款。不要补充同段其他指标。"
         def final_text(value):
             value = normalize_citations(value)
-            if definition_subject(question):
+            if definition_subject(question) and not requirements:
                 sentences = [part for part in re.split(r"(?<=[。！？])", value) if part.strip()]
                 value = "".join(sentences[:2])
             return value
@@ -294,7 +308,7 @@ def answer_question(question: str, chunks: list[dict], top_k: int = 5, mode: str
                 "检索到无关资料时直接忽略，不要说明哪些其他话题无法回答；history或sources出现的其他主题不构成用户的新问题。"
                 "每句只引用实际支持该句的必要来源，不要机械标注所有检索结果。"
                 "如资料只有具体产品的描述，应明确用该产品作为实例，不能把其内部实现、开源属性、限制等泛化为整个概念的必备特征。"
-                "概念题优先解释用途和分布/访问方式，省略与问题无关的实现细节。证据不足时明确表示无法确认。用中文回答，控制在200字以内。" + style_instruction),
+                "概念题优先解释用途和分布/访问方式，省略与问题无关的实现细节。证据不足时明确表示无法确认。用中文简洁回答，条款列表应保持完整。" + style_instruction),
             HumanMessage(content=json.dumps({"question": question, "history": history, "sources": sources}, ensure_ascii=False)),
         ]
         with stage("generate", timings):

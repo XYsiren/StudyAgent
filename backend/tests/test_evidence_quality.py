@@ -41,6 +41,69 @@ def test_code_array_indices_are_not_source_numbers():
     assert normalize_citations("包含三个字段。[1][2]") == "包含三个字段 [1][2]。"
 
 
+def test_unit_adjacent_citations_are_recognized_without_changing_arrays():
+    from app.config import Settings
+    from app.services.verification import CITATION_RE, normalize_citations, verify_answer
+    text = "连续作业时间≥4h[1]；充电时间≤2h[1]。电池应符合SJ/T12345[1]。"
+    normalized = normalize_citations(text)
+    assert CITATION_RE.findall(normalized) == ["1", "1", "1"]
+    assert verify_answer(text, [{"text": "连续作业时间≥4h；充电时间≤2h。电池应符合SJ/T12345。"}], Settings(_env_file=None))["passed"]
+    assert normalize_citations("ht[0] arr2[1] matrix10[2]") == "ht[0] arr2[1] matrix10[2]"
+    assert normalize_citations("作业4h；[1]充电2h。[1]") == "作业4h [1]；充电2h [1]。"
+
+
+def test_requested_section_keeps_all_items_and_excludes_sibling_requirements():
+    from app.services.evidence import requirements_question, section_context
+    question = "电池技术性能要求 是什么"
+    assert requirements_question(question) and not requirements_question("电池充电时间要求是多少？")
+    text = ("5.2.3 走行轨\n轨距满足其他要求。\n5.2.4 电池技术性能要求\n"
+            "⑴ 一次充电作业时间≥12h。\n⑵ 循环次数≥2000次。\n"
+            "⑶ 充电时间≤2h。\n⑷ 采用锂离子电池时应符合SJ/T12345。\n"
+            "5.2.5 数据存储容量\n保存图像数据不少于8个标准组。")
+    unrelated = {"text": "6.6.2 性能要求\nUPS符合GB/T1234标准。"}
+    context = section_context(question, [{"text": text}, unrelated])
+    assert len(context) == 1 and "2000" in context[0]["text"]
+    assert "轨距" not in context[0]["text"] and "数据存储" not in context[0]["text"]
+    excerpt = answering._extract(question, [unrelated, {"text": text}])
+    assert all(value in excerpt for value in ["12h", "2000", "2h", "SJ/T12345", "[2]"])
+    assert "UPS" not in excerpt and "轨距" not in excerpt
+    assert answering._extract(question, [{"text": "5.2.4 电池技术性能要求"}, unrelated]) == answering.INSUFFICIENT_EVIDENCE
+
+
+def test_streamed_requirement_list_survives_verification_without_fallback(client, monkeypatch):
+    import json
+
+    from app.config import get_settings
+    from app.services.verification import CITATION_RE
+    from langchain_core.messages import AIMessage, AIMessageChunk
+    settings = get_settings()
+    for key, value in {"cache_ttl": 0, "llm_provider": "ollama", "llm_model": "fixture", "citation_verifier": "llm"}.items():
+        monkeypatch.setattr(settings, key, value)
+    body = "①一次充电作业时间≥12h[1]；②循环次数≥2000次[1]；③充电时间≤2h[1]。\n④采用锂离子电池时应符合SJ/T12345[1]。"
+    candidate = {"id": "c", "chunk_id": "c", "document_id": "d", "knowledge_base_id": "k", "page": 2,
+                 "document_name": "合成设备规范.txt", "score": .03,
+                 "text": "5.2.4 电池技术性能要求\n一次充电作业时间≥12h。循环次数≥2000次。充电时间≤2h。采用锂离子电池时应符合SJ/T12345。\n5.2.5 存储容量\n不少于8组。"}
+    monkeypatch.setattr(answering, "retrieve", lambda *args, **kwargs: [candidate])
+    class Model:
+        def stream(self, messages):
+            yield AIMessageChunk(content=body)
+        def invoke(self, messages):
+            assert "核验器" in messages[0].content
+            data = json.loads(messages[-1].content)
+            assert len(data["claims"]) == 4
+            return AIMessage(content=json.dumps({"answerable": True, "checks": [
+                {"claim_id": claim["claim_id"], "supported": True, "relevant": True, "source_ids": [1]}
+                for claim in data["claims"]]}))
+    monkeypatch.setattr(answering, "configured_llm", lambda *args: Model())
+    events = []
+    result = answering.answer_question("电池技术性能要求是什么", [candidate], emit=lambda *event: events.append(event))
+    assert all(value in result["answer"] for value in ["12h", "2000", "2h", "SJ/T12345"])
+    assert result["provider"] == "fixture" and result["verification"]["passed"]
+    assert result["usage"]["model_calls"] == 2 and len(CITATION_RE.findall(result["answer"])) == 4
+    assert "存储容量" not in result["citations"][0]["text"]
+    assert any(event[0] == "draft" for event in events)
+
+
 def test_pdf_font_decorations_and_full_width_numbers():
     from app.config import Settings
     from app.services.evidence import clean_pdf_text

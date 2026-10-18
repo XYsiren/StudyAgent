@@ -64,6 +64,37 @@ def definition_subject(question):
     return match[1].strip("？?。 ") if match else ""
 
 
+def requirements_question(question):
+    return not quantity_subject(question) and bool(re.search(
+        r"要求|条件|规定|标准|参数|指标|规格", definition_subject(question) or question))
+
+
+def section_context(question, candidates):
+    """Keep an explicitly requested section and its children, within a source page.
+
+    Matching the whole heading avoids confusing battery requirements with UPS
+    requirements. Items inherit the heading's subject even if it isn't repeated.
+    """
+    subject = re.sub(r"\s+", "", definition_subject(question) or question).strip("？?。")
+    matches = []
+    for item in candidates:
+        lines = clean_text(item["text"]).splitlines()
+        headings = []
+        for index, line in enumerate(lines):
+            heading = re.match(r"^\s*(?:(#{1,6})\s+|(\d+(?:\.\d+)+)\s+)(.+?)\s*$", line)
+            if heading:
+                level = len(heading[1]) if heading[1] else len(heading[2].split("."))
+                headings.append((index, level, heading[3]))
+        for position, (start, level, title) in enumerate(headings):
+            if re.sub(r"\s+", "", title) != subject:
+                continue
+            end = next((index for index, other_level, _ in headings[position + 1:] if other_level <= level), len(lines))
+            body = "\n".join(lines[start + 1:end]).strip()
+            matches.append({**item, "text": "\n".join(lines[start:end]).strip(),
+                            "section_title": title, "section_body": body})
+    return matches or candidates
+
+
 def coverage(question, text):
     words = terms(question)
     found = set(tokenize(text))

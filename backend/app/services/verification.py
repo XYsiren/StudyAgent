@@ -7,7 +7,12 @@ CITATION_RE = re.compile(r"(?<![A-Za-z0-9_])\[(\d+)\]")
 
 
 def normalize_citations(answer):
-    return re.sub(r"([。！？])\s*((?:\[\d+\][ \t]*)+)",
+    # A numeric value may end in an ASCII unit directly before its source.
+    # Preserve code identifiers such as ht[0] and arr2[1].
+    answer = re.sub(r"(?<![A-Za-z0-9_])((?:\d+(?:\.\d+)?)(?:\s*(?:ms|mm|cm|km|kWh|Wh|mAh|Ah|kVA|kW|MPa|kPa|Hz|kg|h|min|s|m|V|A|W))?)(?=\[\d+\])",
+                    r"\1 ", answer)
+    answer = re.sub(r"((?<![A-Za-z0-9_])[A-Z]{1,4}/[A-Z]{1,4}\s*\d+(?:[.-]\d+)*)(?=\[\d+\])", r"\1 ", answer)
+    return re.sub(r"([。！？；;])\s*((?:\[\d+\][ \t]*)+)",
                   lambda match: " " + match[2].strip() + match[1], answer)
 
 
