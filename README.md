@@ -1,12 +1,12 @@
 <div align="center">
 
-# 知衡 · Knowledge OS
+# 智能Agent学习助手
 
-### 面向私有文档的智能知识检索与问答平台
+### 面向个人学习资料的智能检索、问答与复习助手
 
-连接分散的知识，让每一个答案有据可循。
+让学习资料变成可检索、可追溯、可持续复习的个人知识库。
 
-[![CI](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/workflows/ci.yml)
+[![CI](https://github.com/XYsiren/StudyAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/XYsiren/StudyAgent/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
 ![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
@@ -28,9 +28,9 @@
 
 ## 项目简介
 
-**知衡（Knowledge OS）** 是一套面向企业知识管理与个人知识沉淀的 RAG 应用，将文档管理、多模态解析、混合检索、引用问答与质量评测整合到统一工作台。
+**智能Agent学习助手** 是一款面向学习场景的 RAG 应用，帮助你把课程讲义、电子书、研究资料和个人笔记整理为可检索的知识库，并通过 Agent 检索、引用问答与学习效果评测辅助理解和复习。
 
-从产品手册、业务制度到研究资料，知衡将原始文档转化为可检索的知识单元，结合大语言模型生成带有原文依据的回答。用户可以沿着引用回到文档与页码，通过检索轨迹了解证据如何被找到，并将历史答案纳入持续评测。
+助手会将原始资料转化为可检索的知识单元，结合大语言模型生成带有原文依据的回答。你可以沿着引用回到来源文档与页码，查看 Agent 的检索过程，并将历史问答纳入评测，持续检查知识检索和回答质量。
 
 > **知识管理 → 证据检索 → 引用问答 → 质量评测**，形成可追溯、可迭代的知识应用闭环。
 
@@ -38,10 +38,10 @@
 
 | 场景 | 使用方式 |
 | --- | --- |
-| 企业制度与业务知识 | 汇集制度、流程与操作规范，按问题定位条款及来源 |
-| 产品与技术支持 | 将产品说明、使用手册和技术文档组织为可查询的知识库 |
-| 研究与资料整理 | 跨文档检索关键信息，保留文献片段和页码依据 |
-| RAG 应用开发 | 对比检索策略、检查 Agent 轨迹、复评历史答案与模型效果 |
+| 课程学习与考试复习 | 汇集课件、教材和复习资料，按问题定位知识点及出处 |
+| 论文与研究资料 | 跨文档检索关键信息，保留文献片段和页码依据 |
+| 个人知识整理 | 将笔记、电子书和学习资料组织为可持续积累的知识库 |
+| Agent / RAG 学习实践 | 对比检索策略、检查 Agent 轨迹、复评历史答案与模型效果 |
 
 ## 产品预览
 
@@ -49,19 +49,19 @@
 
 按主题组织知识库，统一管理文档、解析状态与检索分块。
 
-![知衡知识空间与文档管理](docs/images/knowledge-workspace.jpg)
+![智能Agent学习助手的知识空间与文档管理](docs/images/knowledge-workspace.jpg)
 
 ### 引用问答
 
 结合私有文档生成回答，在同一页面查看来源编号、原文片段与页码。
 
-![知衡引用问答与参考证据](docs/images/cited-chat.jpg)
+![智能Agent学习助手的引用问答与参考证据](docs/images/cited-chat.jpg)
 
 ### 质量评测
 
 将历史答案加入评测，结合参考答案与期望文档查看检索指标和 Ragas 结果。
 
-![知衡历史答案复评与质量指标](docs/images/evaluation-center.jpg)
+![智能Agent学习助手的历史答案复评与质量指标](docs/images/evaluation-center.jpg)
 
 <details>
 <summary>查看团队治理与文档版本管理</summary>
@@ -166,8 +166,8 @@ flowchart LR
 准备 Docker 与 Compose，克隆仓库并创建部署配置：
 
 ```bash
-git clone https://github.com/leonbuilds-ai/rag-knowledge-assistant.git
-cd rag-knowledge-assistant
+git clone https://github.com/XYsiren/StudyAgent.git
+cd StudyAgent
 cp .env.production.example .env.docker
 ```
 
@@ -189,8 +189,8 @@ docker compose --env-file .env.docker up --build -d
 环境要求：**Python 3.12、Node.js 20.19+**，以及可用的模型服务。
 
 ```bash
-git clone https://github.com/leonbuilds-ai/rag-knowledge-assistant.git
-cd rag-knowledge-assistant
+git clone https://github.com/XYsiren/StudyAgent.git
+cd StudyAgent
 
 python -m venv .venv
 source .venv/bin/activate
@@ -258,7 +258,7 @@ GitHub Actions 覆盖后端测试、真实 PostgreSQL/Redis/Qdrant 集成回归�
 ## 项目结构
 
 ```text
-rag-knowledge-assistant/
+StudyAgent/
 ├── backend/
 │   ├── app/
 │   │   ├── api/             # 账户、知识库、文档、问答与评测接口
