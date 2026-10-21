@@ -1,4 +1,5 @@
 import logging
+import re
 import threading
 import time
 import uuid
@@ -29,7 +30,10 @@ class UploadLimitMiddleware:
             return await self.app(scope, receive, send)
         # 1 MB is reserved for multipart field names and boundaries; the file
         # itself has a separate exact size check in the upload handler.
-        upload = scope.get("path") == "/api/documents/upload"
+        path = scope.get("path", "")
+        upload = path == "/api/documents/upload" or re.fullmatch(
+            r"/api/courses/[^/]+/materials/upload/?", path
+        ) is not None
         maximum = ((self.settings.max_upload_mb + 1) if upload else 4) * 1024 * 1024
         length = dict(scope.get("headers", [])).get(b"content-length", b"0")
         try:
@@ -89,7 +93,7 @@ def create_app(settings=None):
                 worker.join(timeout=10)
             database.engine.dispose()
 
-    app = FastAPI(title="知衡 · RAG Knowledge Assistant", version=__version__, lifespan=lifespan)
+    app = FastAPI(title="拾意 · RAG Knowledge Assistant", version=__version__, lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins,
                        allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH", "OPTIONS"],
                        allow_headers=["Authorization", "Content-Type", "X-RAG-Request"])
@@ -127,6 +131,8 @@ def create_app(settings=None):
     app.include_router(oidc_router)
     from app.api.platform import router as platform_router
     app.include_router(platform_router)
+    from app.api.learning import router as learning_router
+    app.include_router(learning_router)
     return app
 
 

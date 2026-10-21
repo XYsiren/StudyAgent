@@ -1,9 +1,9 @@
 export type User = { id: string; email: string; name: string; is_platform_admin?: boolean }
 export type KnowledgeBase = { id: string; name: string; description: string; created_at: string; document_count: number; organization_id?: string; visibility?: 'organization' | 'restricted'; role: 'admin' | 'editor' | 'reader' }
-export type Document = { id: string; knowledge_base_id: string; name: string; size_bytes: number; status: string; chunk_count: number; error?: string; created_at: string; job_id?: string; active_revision_id?: string; source?: string; expires_at?: string }
+export type Document = { parse_status?: string; id: string; knowledge_base_id: string; name: string; size_bytes: number; status: string; chunk_count: number; error?: string; created_at: string; job_id?: string; active_revision_id?: string; source?: string; expires_at?: string }
 export type Job = { id: string; status: string; progress: number; error?: string; document_id: string; stage?: string; processed_pages?: number; total_pages?: number }
-export type Chunk = { id: string; text: string; page: number | null; ordinal: number }
-export type Citation = { chunk_id: string; document_id: string; document_name: string; knowledge_base_id: string; page: number | null; text: string; score: number; revision_id?: string; source?: string }
+export type Chunk = { id: string; text: string; page: number | null; ordinal: number; slide_number?: number; page_label?: string; source_type?: string }
+export type Citation = { chunk_id: string; document_id: string; document_name: string; knowledge_base_id: string; page: number | null; slide_number?: number; page_label?: string; source_type?: string; text: string; score: number; revision_id?: string; source?: string }
 export type Trace = { step: string; detail: unknown }
 export type Message = { id: string; role: string; content: string; citations?: Citation[]; trace?: Trace[]; created_at?: string; pending?: boolean }
 export type Conversation = { id: string; title: string; created_at: string }
@@ -51,8 +51,8 @@ export async function downloadDocument(documentId: string, filename: string, rev
 }
 
 export async function streamChat(body: Record<string, unknown>, signal: AbortSignal,
-  onDraft: (text: string) => void): Promise<ChatResponse> {
-  const response = await fetch(`${API_BASE}/chat/stream`, { method: 'POST', credentials: 'same-origin', signal,
+  onDraft: (text: string) => void, endpoint = '/chat/stream'): Promise<ChatResponse> {
+  const response = await fetch(`${API_BASE}${endpoint}`, { method: 'POST', credentials: 'same-origin', signal,
     headers: { 'Content-Type': 'application/json', 'X-RAG-Request': '1' }, body: JSON.stringify(body) })
   if (!response.ok || !response.body) throw new ApiError(`问答请求失败（${response.status}）`, response.status)
   const reader = response.body.getReader(), decoder = new TextDecoder()

@@ -1,0 +1,13 @@
+services:
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  evaluation-worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  migrate:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

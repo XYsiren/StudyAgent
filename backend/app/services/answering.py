@@ -270,7 +270,10 @@ def answer_question(question: str, chunks: list[dict], top_k: int = 5, mode: str
         "retrieval_score": c.get("retrieval_score"), "rerank_score": c.get("rerank_score"),
         "dense_score": c.get("dense_score"), "bm25_score": c.get("bm25_score"),
         "revision_id": c.get("revision_id"), "source": c.get("source", "upload"),
-        "context_chunk_ids": c.get("context_chunk_ids", [c["id"]])} for c in candidates]
+        "context_chunk_ids": c.get("context_chunk_ids", [c["id"]]),
+        "slide_number": c.get("slide_number"), "source_type": c.get("source_type"),
+        "page_label": c.get("page_label") or (f"第 {c['page']} 页" if c.get('page') else None),
+        "slide_title": c.get("slide_title")} for c in candidates]
     provider, usage = "extractive", {"model_calls": 0}
     verification = {"mode": "extractive", "passed": True, "semantic_checked": False, "model_calls": 0}
     if emit:

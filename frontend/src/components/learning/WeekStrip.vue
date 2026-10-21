@@ -1,0 +1,14 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+import { ArrowUpRight, CalendarDays } from 'lucide-vue-next'
+import type { Task } from './types'
+const props=defineProps<{today:string;tasks:Task[];selectedDate:string}>()
+defineEmits<{select:[date:string];plan:[]}>()
+const days=computed(()=>Array.from({length:7},(_,i)=>{const date=new Date(props.today+'T12:00:00+08:00');date.setUTCDate(date.getUTCDate()+i);const iso=date.toISOString().slice(0,10);const tasks=props.tasks.filter(t=>t.scheduled_for===iso);return {iso,number:Number(iso.slice(-2)),label:i===0?'今天':['周日','周一','周二','周三','周四','周五','周六'][date.getUTCDay()],tasks:tasks.length,done:tasks.filter(t=>t.status==='completed').length}}))
+</script>
+<template>
+  <section class="week-strip"><header><span><CalendarDays :size="15"/> 把进步，放进日常</span><button @click="$emit('plan')">完整计划 <ArrowUpRight :size="14"/></button></header><div class="week-days"><button v-for="day in days" :key="day.iso" :class="{selected:selectedDate===day.iso,today:today===day.iso}" :aria-pressed="selectedDate===day.iso" :aria-label="`${day.iso}，${day.tasks} 项任务，已完成 ${day.done} 项`" @click="$emit('select',day.iso)"><small>{{ day.label }}</small><strong>{{ day.number }}</strong><span class="week-dots"><i v-for="dot in Math.min(3,day.tasks)" :key="dot" :class="{done:dot<=day.done}"/><em v-if="!day.tasks">—</em></span></button></div></section>
+</template>
+<style scoped>
+.week-strip{background:#fffdf7;border:1px solid #e4ded1;border-radius:20px;padding:21px 23px}.week-strip header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px}.week-strip header>span,.week-strip header>button{display:flex;align-items:center;gap:8px}.week-strip header>span{font-size:13px;font-weight:600}.week-strip header>button{font-size:12px;color:#7c725e}.week-days{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}.week-days>button{border-radius:13px;padding:13px 3px 10px;text-align:center;display:flex;align-items:center;flex-direction:column;gap:10px;transition:background .18s;background:#f6f3eb;color:#514c40;border:1px solid transparent}.week-days>button:hover{border-color:#c6b99f}.week-days>button.selected{background:#dce6b9;color:#33432b}.week-days>button small{font-size:11px;color:inherit;opacity:.7}.week-days>button strong{font-family:Georgia,serif;font-weight:400;font-size:25px}.week-dots{display:flex;align-items:center;justify-content:center;height:8px;gap:3px}.week-dots i{width:4px;height:4px;border-radius:50%;background:#c9bba7}.week-dots i.done{background:#567847}.week-dots em{font-size:9px;font-style:normal;color:#a29b8c}@media(max-width:480px){.week-strip{padding:18px 14px}.week-days{gap:4px}.week-days>button{padding-inline:0}.week-days>button strong{font-size:22px}.week-strip header>span{font-size:12px}}
+</style>

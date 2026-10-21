@@ -49,7 +49,7 @@ class CorpusScope:
         return {c.id: {"id": c.id, "document_id": d.id, "document_name": d.name,
             "knowledge_base_id": d.knowledge_base_id, "text": c.text, "page": c.page,
             "ordinal": c.ordinal, "revision_id": c.revision_id, "source": d.source,
-            "knowledge_base_name": name} for c, d, name in rows}
+            "knowledge_base_name": name, **(c.source_metadata or {})} for c, d, name in rows}
 
     def sparse(self, question, limit):
         from app.services.evidence import terms
@@ -87,7 +87,7 @@ class CorpusScope:
         expanded = []
         for candidate in candidates:
             group = [row for row in rows if row.document_id == candidate["document_id"]
-                     and row.page == candidate.get("page") and abs(row.ordinal-candidate["ordinal"]) <= 1]
+                     and row.page == candidate.get("page") and (row.source_metadata or {}).get("slide_number") == candidate.get("slide_number") and abs(row.ordinal-candidate["ordinal"]) <= 1]
             text = ""
             for row in group:
                 part = clean_text(row.text)

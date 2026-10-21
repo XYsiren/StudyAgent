@@ -1,0 +1,15 @@
+export type Course = { id: string; name: string; exam_name: string; exam_date: string; weekly_minutes: number; target_score: number | null; syllabus: string; knowledge_base_id: string; generation: number; exam_passed: boolean; status: string }
+export type Unit = { id: string; title: string; parent_id: string | null; ordinal: number; weight: number }
+export type Point = { id: string; title: string; description: string; unit_id: string | null; importance: number; mastery_state: string; confirmed_at: string | null }
+export type Material = { parse_status?: string; active_revision_id?: string; id: string; name: string; status: string; chunk_count: number; error?: string; job_id?: string; file_type: string; slide_count: number; unparsed_objects: number; material_metadata: {type?: string; unit_id?: string; trust_note?: string}; parse_metadata: {pages?: Slide[]} }
+export type Source = { revision_id?: string; chunk_id?: string; id?: string; document_id: string; document_name: string; text: string; page?: number | null; slide_number?: number; page_label?: string; slide_title?: string }
+export type Slide = {slide_number: number; slide_title: string; text: string; page_type: string; unparsed_objects: number; thumbnail?: string; parse_status: string}
+export type Task = {id: string; title: string; scheduled_for: string; minutes: number; status: string; task_type: string; target_id: string | null}
+export type Plan = {tasks: Task[]; today: string; exam_passed: boolean; daily_budget_minutes: number}
+export type Quiz = {id: string; stem: string; type: string; status: string; options: string[]; answer: string; explanation: string; citations: Source[]; difficulty: string}
+export type Attempt = {id: string; answer: string; is_correct: boolean | null; standard_answer: string; explanation: string; citations: Source[]; feedback: string; error_tags: string[]; suggested_error_tags: string[]; quiz?: Quiz}
+export type Review = {id: string; level: number; due_at: string; quiz: Quiz}
+export type Reviews = {cards: Review[]; due_count: number; daily_budget_minutes: number; remaining_minutes: number; interval_days: number[]}
+export type Metric = {value: number | null; sample_size: number; period: {from: string; to: string; scope: string}; definition_version: string; definition: string; insufficient_sample: boolean}
+export type Overview = {metrics: Record<string, Metric>; today_tasks: Task[]; exam_notice: string | null; material_status: Record<string,number>}
+export type GenerationJob = {id: string; status: string; error: string | null; result: {generated?: number; skipped?: string[]; note?: string}}

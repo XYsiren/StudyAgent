@@ -67,6 +67,9 @@ class Document(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     source: Mapped[str] = mapped_column(Text, default="upload")
 
+    material_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    parse_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+
 
 class Chunk(Base):
     __tablename__ = "chunks"
@@ -77,6 +80,8 @@ class Chunk(Base):
     ordinal: Mapped[int] = mapped_column(Integer)
     revision_id: Mapped[str | None] = mapped_column(String(36), index=True)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    source_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class IngestionJob(Base):
@@ -189,6 +194,8 @@ class DocumentRevision(Base):
     status: Mapped[str] = mapped_column(String(20), default="queued")
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    parse_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class ChunkTerm(Base):

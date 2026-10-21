@@ -42,7 +42,7 @@ from app.worker import notify_job
 
 router = APIRouter(prefix="/api")
 logger = logging.getLogger(__name__)
-ALLOWED_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".html", ".htm", ".pdf", ".docx", ".png", ".jpg", ".jpeg", ".webp"}
+ALLOWED_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".html", ".htm", ".pdf", ".docx", ".pptx", ".png", ".jpg", ".jpeg", ".webp"}
 
 
 def user_payload(user, settings=None):
@@ -86,13 +86,21 @@ def own_conversation(db, user, conversation_id):
 
 
 def document_payload(db, document):
-    job_id = db.scalar(select(IngestionJob.id).where(IngestionJob.document_id == document.id)
+    latest_job = db.scalar(select(IngestionJob).where(IngestionJob.document_id == document.id)
                        .order_by(IngestionJob.created_at.desc()).limit(1))
+    job_id = latest_job.id if latest_job else None
     return {"id": document.id, "knowledge_base_id": document.knowledge_base_id, "name": document.name,
             "size_bytes": document.size_bytes, "status": document.status, "chunk_count": document.chunk_count,
             "error": document.error, "created_at": document.created_at, "job_id": job_id,
             "active_revision_id": document.active_revision_id, "expires_at": document.expires_at,
-            "source": document.source}
+            "source": document.source, "material_metadata": document.material_metadata,
+            "parse_metadata": {k:v for k,v in document.parse_metadata.items() if k != "pages"},
+            "file_type": Path(document.name).suffix.lstrip('.').lower(),
+            "slide_count": document.parse_metadata.get('slide_count', 0),
+            "page_count": document.parse_metadata.get('page_count', 0),
+            "unparsed_objects": document.parse_metadata.get('unparsed_objects', 0),
+            "parse_status": latest_job.status if latest_job else document.status,
+            "parse_capabilities": {"pptx": True, "legacy_ppt": False}}
 
 
 def evaluation_payload(run, db=None, user=None):
@@ -259,8 +267,15 @@ async def upload_document(request: Request, db: DB, user: CurrentUser,
         raise HTTPException(409, "已有文档任务正在运行")
     filename = Path((file.filename or "").replace("\\", "/")).name[:255]
     suffix = Path(filename).suffix.lower()
+    if suffix == '.ppt':
+        raise HTTPException(415, '旧版 PPT 暂不支持，请转换为 .pptx 后上传')
+    if suffix == '.pptx' and file.content_type not in {
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'application/octet-stream', 'application/zip', None,
+    }:
+        raise HTTPException(415, 'PPTX MIME 类型无效，请上传正确的 .pptx 文件')
     if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(415, "不支持此格式。支持 PDF、Word(docx)、文本、Markdown、CSV、JSON、HTML 和图片")
+        raise HTTPException(415, "不支持此格式。支持 PDF、PPTX、Word(docx)、文本、Markdown、CSV、JSON、HTML 和图片")
     settings = request.app.state.settings
     upload_root = (settings.data_dir / "uploads").resolve()
     upload_root.mkdir(parents=True, exist_ok=True)
@@ -274,6 +289,12 @@ async def upload_document(request: Request, db: DB, user: CurrentUser,
                     raise HTTPException(413, f"文档不能超过 {settings.max_upload_mb} MB")
                 digest.update(data)
                 output.write(data)
+        if suffix == '.pptx':
+            from app.services.pptx_parser import validate_pptx
+            try:
+                validate_pptx(target)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
         if size == 0:
             raise HTTPException(400, "不能上传空文件")
         existing = db.scalar(select(Document).where(Document.knowledge_base_id == knowledge_base_id,
@@ -353,9 +374,9 @@ def retry_document(document_id: str, request: Request, db: DB, user: CurrentUser
     document = own_document(db, user, document_id, "write")
     from app.services.lifecycle import reserve_ingestion
     reserve_ingestion(db, user, document.knowledge_base_id, request.app.state.settings)
-    if document.status not in {"failed", "ready"}:
+    if document.status not in {"failed", "ready", "vision_pending"}:
         raise HTTPException(409, "仅失败或已就绪的文档可以重新索引")
-    changed = db.execute(update(Document).where(Document.id == document_id, Document.status.in_(["failed", "ready"]))
+    changed = db.execute(update(Document).where(Document.id == document_id, Document.status.in_(["failed", "ready", "vision_pending"]))
                          .values(status="queued", error=None))
     if changed.rowcount != 1:
         raise HTTPException(409, "任务状态已变化，请刷新后重试")
@@ -374,7 +395,7 @@ def retry_document(document_id: str, request: Request, db: DB, user: CurrentUser
 @router.get("/documents/{document_id}/chunks")
 def document_chunks(document_id: str, db: DB, user: CurrentUser):
     document = own_document(db, user, document_id)
-    return [{"id": chunk.id, "text": chunk.text, "page": chunk.page, "ordinal": chunk.ordinal}
+    return [{"id": chunk.id, "text": chunk.text, "page": chunk.page, "ordinal": chunk.ordinal, **(chunk.source_metadata or {})}
             for chunk in db.scalars(select(Chunk).where(Chunk.document_id == document_id,
                 Chunk.revision_id == document.active_revision_id).order_by(Chunk.ordinal).limit(500)).all()]
 

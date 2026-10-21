@@ -1,6 +1,6 @@
 # 部署与模型配置
 
-知衡支持 Docker Compose 部署，也支持独立启动 API、前端和文档处理 Worker。开发环境可以使用 SQLite 与 Qdrant local 验证完整流程；需要独立 Worker 时，应使用 Qdrant server。
+拾意支持 Docker Compose 部署，也支持独立启动 API、前端和文档处理 Worker。开发环境可以使用 SQLite 与 Qdrant local 验证完整流程；需要独立 Worker 时，应使用 Qdrant server。
 
 ## Docker Compose 部署
 

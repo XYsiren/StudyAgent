@@ -34,7 +34,7 @@ onUnmounted(() => clearInterval(timer))
     <div class="modal-header"><span class="eyebrow">DOCUMENT LIFECYCLE</span><button class="text-button" @click="$emit('close')">关闭</button></div>
     <h2 id="versions-title">文档版本与有效期</h2><p>{{ document.name }} · 新版本完成后切换，重建期间继续使用原版本。</p>
     <p v-if="error" role="alert" class="version-error">{{ error }}</p>
-    <template v-if="writable"><label>上传更新文件<input type="file" :disabled="busy" accept=".pdf,.docx,.txt,.md,.csv,.json,.html,.png,.jpg,.jpeg,.webp" @change="upload" /></label>
+    <template v-if="writable"><label>上传更新文件<input type="file" :disabled="busy" accept=".pdf,.docx,.pptx,.txt,.md,.csv,.json,.html,.png,.jpg,.jpeg,.webp" @change="upload" /></label>
       <form @submit.prevent="run(() => api(`/documents/${document.id}/metadata`, { method: 'PATCH', body: JSON.stringify({ source, expires_at: expires ? new Date(expires).toISOString() : null }) }))">
         <label>来源标识<input v-model="source" maxlength="2000" /></label><label>有效期至（本地时间，留空为长期有效）<input v-model="expires" type="datetime-local" /></label><button class="btn secondary" :disabled="busy">保存来源与有效期</button>
       </form></template>

@@ -1,6 +1,6 @@
 <div align="center">
 
-# 智能Agent学习助手
+# 拾意 · 学习与复习助手
 
 ### 面向个人学习资料的智能检索、问答与复习助手
 
@@ -28,7 +28,7 @@
 
 ## 项目简介
 
-**智能Agent学习助手** 是一款面向学习场景的 RAG 应用，帮助你把课程讲义、电子书、研究资料和个人笔记整理为可检索的知识库，并通过 Agent 检索、引用问答与学习效果评测辅助理解和复习。
+**拾意 · 学习与复习助手** 是一款面向学习场景的 RAG 应用，帮助你把课程讲义、电子书、研究资料和个人笔记整理为可检索的知识库，并通过 Agent 检索、引用问答与学习效果评测辅助理解和复习。
 
 助手会将原始资料转化为可检索的知识单元，结合大语言模型生成带有原文依据的回答。你可以沿着引用回到来源文档与页码，查看 Agent 的检索过程，并将历史问答纳入评测，持续检查知识检索和回答质量。
 
@@ -49,28 +49,28 @@
 
 按主题组织知识库，统一管理文档、解析状态与检索分块。
 
-![智能Agent学习助手的知识空间与文档管理](docs/images/knowledge-workspace.jpg)
+![拾意 · 学习与复习助手的知识空间与文档管理](docs/images/knowledge-workspace.png)
 
 ### 引用问答
 
 结合私有文档生成回答，在同一页面查看来源编号、原文片段与页码。
 
-![智能Agent学习助手的引用问答与参考证据](docs/images/cited-chat.jpg)
+![拾意 · 学习与复习助手的引用问答与参考证据](docs/images/cited-chat.png)
 
 ### 质量评测
 
 将历史答案加入评测，结合参考答案与期望文档查看检索指标和 Ragas 结果。
 
-![智能Agent学习助手的历史答案复评与质量指标](docs/images/evaluation-center.jpg)
+![拾意 · 学习与复习助手的历史答案复评与质量指标](docs/images/evaluation-center.png)
 
 <details>
 <summary>查看团队治理与文档版本管理</summary>
 
-![组织成员、知识库单独授权与操作审计](docs/images/governance-workspace.jpg)
+![组织成员、知识库单独授权与操作审计](docs/images/governance-workspace.png)
 
-![文档版本、历史恢复与有效期](docs/images/document-versions.jpg)
+![文档版本、历史恢复与有效期](docs/images/document-versions.png)
 
-![平台管理员调整配额与管理任务](docs/images/platform-controls.jpg)
+![平台管理员调整配额与管理任务](docs/images/platform-controls.png)
 
 </details>
 

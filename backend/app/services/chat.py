@@ -15,18 +15,21 @@ from app.services.admission import capacity, consume
 from app.services.corpus import CorpusScope
 
 
-def run_chat(body, db, user, request, emit=None, cancelled=None):
+def run_chat(body, db, user, request, emit=None, cancelled=None, scope_factory=None, scope_key=None):
     from app.services.answering import PROMPT_VERSION, answer_question
     settings, database = request.app.state.settings, request.app.state.database
     from app.services.operations import effective_settings
     settings = effective_settings(db, settings, user.id)
     key = body.request_id or new_id()
-    digest = hashlib.sha256(json.dumps(body.model_dump(exclude={"request_id"}), sort_keys=True).encode()).hexdigest()
+    digest_body = body.model_dump(exclude={"request_id"})
+    if scope_key is not None:
+        digest_body = {"body": digest_body, "scope": scope_key}
+    digest = hashlib.sha256(json.dumps(digest_body, sort_keys=True).encode()).hexdigest()
     conversation = db.scalar(select(Conversation).where(Conversation.id == body.conversation_id,
         Conversation.user_id == user.id)) if body.conversation_id else None
     if body.conversation_id and not conversation:
         raise HTTPException(404, "会话不存在")
-    scope = CorpusScope(db, user, body.knowledge_base_ids)
+    scope = (scope_factory(db, user) if scope_factory else CorpusScope(db, user, body.knowledge_base_ids))
     existing = db.scalar(select(ChatRequestRun).where(ChatRequestRun.user_id == user.id, ChatRequestRun.request_key == key))
     if existing:
         if existing.body_hash != digest:
@@ -110,7 +113,7 @@ def run_chat(body, db, user, request, emit=None, cancelled=None):
             actor = db.get(User, user.id)
             if not login or login.revoked or login.expires_at <= utcnow() or actor.disabled:
                 raise HTTPException(401, "登录状态已被撤销")
-            fresh_scope = CorpusScope(db, user, body.knowledge_base_ids)
+            fresh_scope = (scope_factory(db, user) if scope_factory else CorpusScope(db, user, body.knowledge_base_ids))
             citations = result.get("citations", [])
             valid = fresh_scope.hydrate([c["chunk_id"] for c in citations])
             if any(c["chunk_id"] not in valid for c in citations):

@@ -6,18 +6,19 @@ import io
 import json
 import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.config import get_settings
 
-SUPPORTED_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".html", ".htm", ".pdf", ".docx", ".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".html", ".htm", ".pdf", ".docx", ".pptx", ".png", ".jpg", ".jpeg", ".webp"}
 
 
 @dataclass(frozen=True)
 class ParsedPage:
     text: str
-    page: int = 1
+    page: int | None = 1
+    metadata: dict = field(default_factory=dict)
 
 
 def _decode(data: bytes) -> str:
@@ -74,6 +75,9 @@ def parse_document(path: Path, filename: str, progress=None) -> list[ParsedPage]
     ext = Path(filename).suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"不支持 {ext or '无扩展名'} 格式，请上传 PDF、DOCX、文本或图片")
+    if ext == ".pptx":
+        from app.services.pptx_parser import parse_pptx
+        return parse_pptx(path, progress)
     if ext == ".pdf":
         import pypdfium2
         try:
@@ -162,7 +166,7 @@ def chunk_pages(pages: list[ParsedPage]) -> list[dict]:
     for page in pages:
         for text in splitter.split_text(page.text.replace("\x00", "").strip()):
             if text.strip():
-                chunks.append({"text": text, "page": page.page, "ordinal": len(chunks)})
+                chunks.append({"text": text, "page": page.page, "ordinal": len(chunks), "source_metadata": page.metadata})
     if not chunks:
         raise ValueError("文档没有可检索文本；扫描件请开启 OCR/视觉模型")
     return chunks

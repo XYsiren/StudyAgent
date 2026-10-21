@@ -99,6 +99,11 @@ def process_job(database, settings, job_id):
             revision.status, document.status, document.error = "processing", "processing", None
             db.add(CleanupTask(document_id=document_id, revision_id=revision_id,
                 available_at=utcnow() + timedelta(seconds=settings.job_lease_seconds)))
+            from app.models_learning import Course
+            from app.services.learning import event
+            course = db.scalar(select(Course).where(Course.knowledge_base_id == kb_id))
+            if course:
+                event(db, course, 'material_parse_started', document_id)
             db.commit()
         path = Path(stored_path).resolve()
         if not path.is_relative_to((settings.data_dir / "uploads").resolve()):
@@ -114,7 +119,12 @@ def process_job(database, settings, job_id):
                 db.commit()
                 if not changed.rowcount:
                     raise ValueError("任务已取消、删除或租约已变化")
-        parsed = chunk_pages(parse_document(path, filename, progress=report))
+        pages = parse_document(path, filename, progress=report)
+        report(len(pages), len(pages), "切分知识片段")
+        parsed = chunk_pages(pages)
+        parse_metadata = {"revision_id": revision_id, "page_count": len(pages), "slide_count": len(pages) if filename.lower().endswith('.pptx') else 0,
+            "unparsed_objects": sum(p.metadata.get('unparsed_objects', 0) for p in pages),
+            "pages": [{"text": p.text[:12000], **p.metadata} for p in pages] if filename.lower().endswith('.pptx') else []}
         indexed = [{"id": str(uuid.uuid5(uuid.UUID(revision_id), str(item["ordinal"]))), "document_id": document_id, "document_name": filename,
             "knowledge_base_id": kb_id, "revision_id": revision_id, **item} for item in parsed]
 
@@ -146,11 +156,12 @@ def process_job(database, settings, job_id):
             for item in indexed:
                 length, terms = term_rows(item["id"], item["text"])
                 db.add(Chunk(id=item["id"], document_id=document_id, revision_id=revision_id, text=item["text"],
-                             page=item.get("page"), ordinal=item["ordinal"], token_count=length))
+                             page=item.get("page"), ordinal=item["ordinal"], token_count=length, source_metadata=item.get("source_metadata", {})))
                 db.flush()
                 db.add_all(terms)
             revision = db.get(DocumentRevision, revision_id)
             revision.status, revision.chunk_count = "ready", len(indexed)
+            revision.parse_metadata = parse_metadata
             doc.active_revision_id, doc.status, doc.chunk_count, doc.error = revision_id, "ready", len(indexed), None
             doc.stored_path, doc.name, doc.sha256, doc.size_bytes = (
                 revision.stored_path, revision.name, revision.sha256, revision.size_bytes)
@@ -160,6 +171,12 @@ def process_job(database, settings, job_id):
             db.execute(update(CleanupTask).where(CleanupTask.document_id == document_id,
                 CleanupTask.revision_id == revision_id, CleanupTask.status == "queued").values(status="completed"))
             job.status, job.progress, job.error = "completed", 100, None
+            doc.parse_metadata = parse_metadata
+            from app.services.learning import refresh_material_plan
+            refresh_material_plan(db, kb_id)
+            course = db.scalar(select(Course).where(Course.knowledge_base_id == kb_id))
+            if course:
+                event(db, course, 'material_parse_completed', document_id, {'pages':len(pages)})
             job.stage = "已完成"
             job.lease_token = job.lease_expires_at = None
             db.commit()
@@ -176,10 +193,25 @@ def process_job(database, settings, job_id):
                 job.available_at = utcnow() + timedelta(seconds=2 ** job.attempts) if retry else None
                 job.lease_token = job.lease_expires_at = None
                 doc, revision = db.get(Document, document_id), db.get(DocumentRevision, revision_id) if revision_id else None
+                from app.services.pptx_parser import VisionPending
+                if isinstance(exc, VisionPending):
+                    job.status, job.stage = 'vision_pending', '需要视觉解析'
+                    if doc:
+                        doc.parse_metadata = {**exc.metadata, 'revision_id': revision_id}
+                    if revision:
+                        revision.parse_metadata = {**exc.metadata, 'revision_id': revision_id}
                 if doc:
                     doc.status, doc.error = ("queued" if retry else "ready" if doc.active_revision_id else "failed"), job.error
+                    if isinstance(exc, VisionPending) and not doc.active_revision_id:
+                        doc.status = 'vision_pending'
                 if revision:
                     revision.status = "queued" if retry else "failed"
+                from app.models_learning import Course
+                from app.services.learning import event
+                course = db.scalar(select(Course).where(Course.knowledge_base_id == kb_id))
+                if course:
+                    event(db, course, 'slide_vision_pending' if isinstance(exc, VisionPending) else 'material_parse_failed',
+                        document_id, {'error_type': type(exc).__name__, 'retrying': retry})
                 db.commit()
     finally:
         done.set()
@@ -259,6 +291,9 @@ def run_worker(database, settings, stop):
             for job_id in pending:
                 if not stop.is_set() and settings.worker_role in {"all", "ingestion"}:
                     process_job(database, settings, job_id)
+            if not stop.is_set() and settings.worker_role in {'all', 'evaluation'}:
+                from app.services.quiz import process_learning_jobs
+                process_learning_jobs(database, settings)
             for run_id in evaluations:
                 if not stop.is_set() and settings.worker_role in {"all", "evaluation"}:
                     process_evaluation(database, settings, run_id)
